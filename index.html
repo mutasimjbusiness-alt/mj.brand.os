@@ -10110,7 +10110,7 @@
       });
     }
     function idbPut(key, val) {
-      return new Promise(async (res, rej) => {
+      return new Promise(async (res) => {
         try {
           // Keep local copy for offline/fallback.
           if (IDB) {
@@ -10137,7 +10137,8 @@
           res();
         } catch (e) {
           console.warn('idbPut error', key, e);
-          rej(e);
+          // Never block UI save flow if cloud media sync fails.
+          res();
         }
       });
     }
@@ -10173,7 +10174,7 @@
       });
     }
     function idbDel(key) {
-      return new Promise(async (res, rej) => {
+      return new Promise(async (res) => {
         try {
           MJ_MEDIA_URL_CACHE.delete(key);
           if (IDB) {
@@ -10191,7 +10192,8 @@
           }
           res();
         } catch (e) {
-          rej(e);
+          console.warn('idbDel error', key, e);
+          res();
         }
       });
     }
