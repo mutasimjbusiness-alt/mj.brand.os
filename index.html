@@ -13015,11 +13015,15 @@
       let _logoClickCount = 0;
       let _logoClickTimer = null;
       let _logoSecretBound = false;
+      let _adminInitDone = false;
 
       const MJAdmin = {
 
         // ─── Bootstrap ───────────────────────────────────
         init() {
+          if (_adminInitDone) return;
+          _adminInitDone = true;
+          console.log('[ADMIN INIT] start');
           const isAdmin = MJPersistence.getTextSync(LS_KEY) === 'true';
           const urlParams = new URLSearchParams(window.location.search);
           const wantsAdmin = urlParams.get('admin') === 'true';
@@ -13177,13 +13181,16 @@
         _attachLogoClickSecret() {
           if (_logoSecretBound) return;
           _logoSecretBound = true;
+          console.log('[ADMIN INIT] secret trigger bound');
 
-          // Delegated listener handles current + future logo nodes.
-          document.addEventListener('click', function (e) {
+          // Capture phase ensures we receive the event even if bubbling is interrupted.
+          const secretHandler = function (e) {
             const logo = e.target?.closest?.('.sidebar-logo, #tn-logo-center');
             if (!logo) return;
             MJAdmin._onSecretLogoClick(logo);
-          });
+          };
+          document.addEventListener('pointerdown', secretHandler, true);
+          document.addEventListener('click', secretHandler, true);
         },
 
         // ─── Patch makeEditable to noop in demo mode ─────
@@ -13542,50 +13549,56 @@
       //  PORTAL + PRICING BOOTSTRAP
       // ════════════════════════════════════════════════════
       (function initPortalAndPricing() {
-        // Render data-driven views
-        renderPortalDisplay();
-        renderPricingCards();
+        try {
+          // Render data-driven views
+          renderPortalDisplay();
+          renderPricingCards();
 
-        const params = new URLSearchParams(window.location.search);
-        const showPortal = params.get('portal') === 'true';
-        const isAdmin = MJPersistence.getTextSync('mj_admin') === 'true';
+          const params = new URLSearchParams(window.location.search);
+          const showPortal = params.get('portal') === 'true';
+          const isAdmin = MJPersistence.getTextSync('mj_admin') === 'true';
 
         // Show portal nav if client was sent portal link
-        if (showPortal) {
-          const portalNav = document.getElementById('nav-portal');
-          if (portalNav) portalNav.style.display = '';
-          if (!params.get('section')) {
-            setTimeout(() => { if (typeof nav === 'function') nav('portal'); }, 400);
+          if (showPortal) {
+            const portalNav = document.getElementById('nav-portal');
+            if (portalNav) portalNav.style.display = '';
+            if (!params.get('section')) {
+              setTimeout(() => { if (typeof nav === 'function') nav('portal'); }, 400);
+            }
           }
-        }
 
-        if (isAdmin) {
-          // Show admin controls
-          const ctrl = document.getElementById('portal-admin-controls');
-          const paw = document.getElementById('pricing-admin-wrap');
-          if (ctrl) ctrl.style.display = 'block';
-          if (paw) paw.style.display = 'block';
+          if (isAdmin) {
+            // Show admin controls
+            const ctrl = document.getElementById('portal-admin-controls');
+            const paw = document.getElementById('pricing-admin-wrap');
+            if (ctrl) ctrl.style.display = 'block';
+            if (paw) paw.style.display = 'block';
 
-          // Render editors
-          renderPortalEditor();
-          renderPricingEditor();
+            // Render editors
+            renderPortalEditor();
+            renderPricingEditor();
 
-          // Fill share URL
-          const shareUrl = document.getElementById('portal-share-url');
-          if (shareUrl) {
-            const url = new URL(window.location.href);
-            url.searchParams.set('portal', 'true');
-            url.searchParams.delete('admin');
-            shareUrl.value = url.toString();
+            // Fill share URL
+            const shareUrl = document.getElementById('portal-share-url');
+            if (shareUrl) {
+              const url = new URL(window.location.href);
+              url.searchParams.set('portal', 'true');
+              url.searchParams.delete('admin');
+              shareUrl.value = url.toString();
+            }
           }
+        } catch (e) {
+          console.error('[ADMIN INIT] portal/pricing bootstrap error', e);
         }
       })();
 
       // Run after DOM ready
       if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () { MJAdmin.init(); });
+        document.addEventListener('DOMContentLoaded', function () {
+          try { MJAdmin.init(); } catch (e) { console.error('[ADMIN INIT] failed', e); }
+        });
       } else {
-        MJAdmin.init();
+        try { MJAdmin.init(); } catch (e) { console.error('[ADMIN INIT] failed', e); }
       }
 
     })();
