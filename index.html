@@ -10110,7 +10110,7 @@
       });
     }
     function idbPut(key, val) {
-      return new Promise(async (res) => {
+      return new Promise(async (res, rej) => {
         try {
           // Keep local copy for offline/fallback.
           if (IDB) {
@@ -10124,21 +10124,30 @@
 
           // Cloud sync for cross-device media persistence.
           const sb = MJPersistence?.getClient?.();
+          if (!sb) {
+            const err = new Error('Supabase client unavailable during media upload');
+            console.error('[Storage][upload] client missing', { bucket: MEDIA_BUCKET, key, error: err.message });
+            return rej(err);
+          }
           if (sb && typeof val === 'string' && val.startsWith('data:')) {
             const path = `assets/${encodeURIComponent(key)}`;
             const blob = dataURLToBlob(val);
-            const { error } = await sb.storage.from(MEDIA_BUCKET).upload(path, blob, {
+            console.log('[Storage][upload] start', { bucket: MEDIA_BUCKET, path, key, size: blob.size, type: blob.type });
+            const { data, error } = await sb.storage.from(MEDIA_BUCKET).upload(path, blob, {
               upsert: true,
               contentType: blob.type || 'image/png'
             });
-            if (error) throw error;
+            if (error) {
+              console.error('[Storage][upload] error', { bucket: MEDIA_BUCKET, path, key, error });
+              return rej(error);
+            }
+            console.log('[Storage][upload] success', { bucket: MEDIA_BUCKET, path, key, response: data });
             MJ_MEDIA_URL_CACHE.delete(key);
           }
           res();
         } catch (e) {
           console.warn('idbPut error', key, e);
-          // Never block UI save flow if cloud media sync fails.
-          res();
+          rej(e);
         }
       });
     }
@@ -10152,9 +10161,13 @@
           if (sb) {
             const path = `assets/${encodeURIComponent(key)}`;
             const { data, error } = await sb.storage.from(MEDIA_BUCKET).download(path);
+            if (error) {
+              console.error('[Storage][download] error', { bucket: MEDIA_BUCKET, path, key, error });
+            }
             if (!error && data) {
               const objUrl = URL.createObjectURL(data);
               MJ_MEDIA_URL_CACHE.set(key, objUrl);
+              console.log('[Storage][download] success', { bucket: MEDIA_BUCKET, path, key, bytes: data.size || null });
               return res(objUrl);
             }
           }
@@ -10174,7 +10187,7 @@
       });
     }
     function idbDel(key) {
-      return new Promise(async (res) => {
+      return new Promise(async (res, rej) => {
         try {
           MJ_MEDIA_URL_CACHE.delete(key);
           if (IDB) {
@@ -10188,12 +10201,18 @@
           const sb = MJPersistence?.getClient?.();
           if (sb) {
             const path = `assets/${encodeURIComponent(key)}`;
-            await sb.storage.from(MEDIA_BUCKET).remove([path]);
+            console.log('[Storage][delete] start', { bucket: MEDIA_BUCKET, path, key });
+            const { data, error } = await sb.storage.from(MEDIA_BUCKET).remove([path]);
+            if (error) {
+              console.error('[Storage][delete] error', { bucket: MEDIA_BUCKET, path, key, error });
+              return rej(error);
+            }
+            console.log('[Storage][delete] success', { bucket: MEDIA_BUCKET, path, key, response: data });
           }
           res();
         } catch (e) {
           console.warn('idbDel error', key, e);
-          res();
+          rej(e);
         }
       });
     }
@@ -10239,7 +10258,7 @@
     const LS_LICENSE = 'mj_v5_license';
     const LS_DATA = 'mj_v5_data';
 
-    // Supabase-backed persistence with localStorage fallback.
+    // Supabase-only persistence (single source of truth).
     const MJPersistence = (() => {
       const CFG = {
         URL: 'https://iqzzuyprmqsopzkegmoh.supabase.co',
@@ -10258,17 +10277,12 @@
           !CFG.ANON_KEY.includes('YOUR_SUPABASE_ANON_KEY');
       }
 
-      function readLS(key) {
-        try { return localStorage.getItem(key); } catch { return null; }
-      }
-      function writeLS(key, val) {
-        try { localStorage.setItem(key, val); } catch { }
-      }
-
       async function init() {
         if (ready) return;
         ready = true;
-        if (!canUseSupabase()) return;
+        if (!canUseSupabase()) {
+          throw new Error('Supabase config is invalid. App state cannot load.');
+        }
         try {
           client = window.supabase.createClient(CFG.URL, CFG.ANON_KEY);
           const keys = ['mj_admin', LS_DATA, 'mj_portal_v1', 'mj_pricing_v1'];
@@ -10280,19 +10294,20 @@
           (data || []).forEach(row => {
             const raw = typeof row.value === 'string' ? row.value : JSON.stringify(row.value);
             cache.set(row.key, raw);
-            writeLS(row.key, raw);
+          });
+          console.log('[DATA SOURCE] loaded from Supabase', {
+            keysLoaded: (data || []).map(r => r.key),
+            total: (data || []).length
           });
         } catch (e) {
-          console.warn('Supabase init fallback to localStorage:', e?.message || e);
           client = null;
+          throw e;
         }
       }
 
       function getRawSync(key) {
         if (cache.has(key)) return cache.get(key);
-        const ls = readLS(key);
-        if (ls !== null) cache.set(key, ls);
-        return ls;
+        return null;
       }
 
       function getJSONSync(key, fallback) {
@@ -10307,29 +10322,26 @@
       }
 
       async function setRaw(key, raw) {
+        if (!client) throw new Error(`Supabase client unavailable while writing key: ${key}`);
         cache.set(key, raw);
-        writeLS(key, raw);
-        if (!client) return;
-        try {
-          let payload = raw;
-          try { payload = JSON.parse(raw); } catch { }
-          await client.from(CFG.TABLE).upsert(
-            { key, value: payload, updated_at: new Date().toISOString() },
-            { onConflict: 'key' }
-          );
-        } catch (e) {
-          console.warn(`Supabase write failed for ${key}:`, e?.message || e);
-        }
+        console.log('[SAVE] writing to Supabase', { key });
+        let payload = raw;
+        try { payload = JSON.parse(raw); } catch { }
+        const { error } = await client.from(CFG.TABLE).upsert(
+          { key, value: payload, updated_at: new Date().toISOString() },
+          { onConflict: 'key' }
+        );
+        if (error) throw error;
       }
 
       async function setJSON(key, value) { await setRaw(key, JSON.stringify(value)); }
       async function setText(key, value) { await setRaw(key, String(value)); }
 
       async function remove(key) {
+        if (!client) throw new Error(`Supabase client unavailable while deleting key: ${key}`);
         cache.delete(key);
-        try { localStorage.removeItem(key); } catch { }
-        if (!client) return;
-        try { await client.from(CFG.TABLE).delete().eq('key', key); } catch { }
+        const { error } = await client.from(CFG.TABLE).delete().eq('key', key);
+        if (error) throw error;
       }
 
       function getClient() { return client; }
@@ -11176,24 +11188,34 @@
       const r = new FileReader(); r.onload = e => { pendingPortAvatar = e.target.result; }; r.readAsDataURL(f);
     }
     async function addPortEntry() {
-      const title = document.getElementById('port-title-inp').value.trim(); if (!title) return;
-      const id = Date.now();
-      const entry = { id, title, desc: document.getElementById('port-desc-inp').value || 'Project description.', type: document.getElementById('port-type-inp').value || 'Brand Project', thumb: pendingPortThumb, avatar: pendingPortAvatar, bg: '#0e1e30' };
-      if (pendingPortThumb) await idbPut(imgKey.portThumb(id), pendingPortThumb);
-      if (pendingPortAvatar) await idbPut(imgKey.portAvatar(id), pendingPortAvatar);
-      portfolioEntries.push(entry);
-      renderPortfolio(); closeModal('modal-add-port'); toast('Project added.');
-      pendingPortThumb = null; pendingPortAvatar = null;
-      ['port-title-inp', 'port-desc-inp', 'port-type-inp'].forEach(id => document.getElementById(id).value = '');
-      document.getElementById('port-thumb-preview').style.display = 'none';
-      saveToLS();
+      try {
+        const title = document.getElementById('port-title-inp').value.trim(); if (!title) return;
+        const id = Date.now();
+        const entry = { id, title, desc: document.getElementById('port-desc-inp').value || 'Project description.', type: document.getElementById('port-type-inp').value || 'Brand Project', thumb: pendingPortThumb, avatar: pendingPortAvatar, bg: '#0e1e30' };
+        if (pendingPortThumb) await idbPut(imgKey.portThumb(id), pendingPortThumb);
+        if (pendingPortAvatar) await idbPut(imgKey.portAvatar(id), pendingPortAvatar);
+        portfolioEntries.push(entry);
+        renderPortfolio(); closeModal('modal-add-port'); toast('Project added.', 'success');
+        pendingPortThumb = null; pendingPortAvatar = null;
+        ['port-title-inp', 'port-desc-inp', 'port-type-inp'].forEach(id => document.getElementById(id).value = '');
+        document.getElementById('port-thumb-preview').style.display = 'none';
+        saveToLS();
+      } catch (err) {
+        console.error('[Portfolio][save] failed', err);
+        toast('Storage upload failed. Check Supabase bucket/policies.', 'error');
+      }
     }
     async function removePort(id) {
       if (!confirm(currentLang === 'ar' ? 'إزالة من المعرض؟' : 'Remove from portfolio?')) return;
-      portfolioEntries = portfolioEntries.filter(p => p.id !== id);
-      await idbDel(imgKey.portThumb(id));
-      await idbDel(imgKey.portAvatar(id));
-      renderPortfolio(); toast('Removed.'); saveToLS();
+      try {
+        portfolioEntries = portfolioEntries.filter(p => p.id !== id);
+        await idbDel(imgKey.portThumb(id));
+        await idbDel(imgKey.portAvatar(id));
+        renderPortfolio(); toast('Removed.'); saveToLS();
+      } catch (err) {
+        console.error('[Portfolio][remove] failed', err);
+        toast('Storage delete failed. Check Supabase policies.', 'error');
+      }
     }
     function loadProjPage(idStr) {
       const p = portfolioEntries.find(x => x.id === parseInt(idStr)) || portfolioEntries[0];
@@ -11210,19 +11232,24 @@
       if (p.gallery) p.gallery.forEach(src => { const item = document.createElement('div'); item.className = 'gallery-item'; item.innerHTML = `<img src="${src}" alt="">`; gallery.insertBefore(item, gallery.firstChild); });
     }
     async function addGalleryImages(input, id) {
-      const p = portfolioEntries.find(x => x.id === id); if (!p) return;
-      if (!p.gallery) p.gallery = [];
-      for (const f of Array.from(input.files)) {
-        const src = await readFileAsDataURL(f);
-        const idx = p.gallery.length;
-        p.gallery.push(src);
-        await idbPut(imgKey.gallery(id, idx), src);
-        const item = document.createElement('div'); item.className = 'gallery-item'; item.innerHTML = `<img src="${src}" alt="">`;
-        const add = document.querySelector('.gallery-add-zone');
-        document.getElementById('pp-gallery').insertBefore(item, add);
+      try {
+        const p = portfolioEntries.find(x => x.id === id); if (!p) return;
+        if (!p.gallery) p.gallery = [];
+        for (const f of Array.from(input.files)) {
+          const src = await readFileAsDataURL(f);
+          const idx = p.gallery.length;
+          p.gallery.push(src);
+          await idbPut(imgKey.gallery(id, idx), src);
+          const item = document.createElement('div'); item.className = 'gallery-item'; item.innerHTML = `<img src="${src}" alt="">`;
+          const add = document.querySelector('.gallery-add-zone');
+          document.getElementById('pp-gallery').insertBefore(item, add);
+        }
+        saveToLS();
+        toast('Gallery updated.', 'success');
+      } catch (err) {
+        console.error('[Portfolio][gallery] failed', err);
+        toast('Gallery upload failed. Check Supabase bucket/policies.', 'error');
       }
-      saveToLS();
-      toast('Gallery updated.', 'success');
     }
 
     // ═══════════════════════════════════════════════════
@@ -11594,11 +11621,11 @@
     }
 
     // ═══════════════════════════════════════════════════
-    // SAVE — Supabase (with localStorage fallback) (text only, no images)
+    // SAVE — Supabase only (text only, no images)
     // ═══════════════════════════════════════════════════
-    function saveToLS(showMsg) {
+    async function saveToLS(showMsg) {
       try {
-        MJPersistence.setJSON(LS_DATA, {
+        await MJPersistence.setJSON(LS_DATA, {
           theme: document.documentElement.getAttribute('data-theme'),
           sysName: document.getElementById('sys-name').textContent,
           sysTagline: document.getElementById('sys-tagline').textContent,
@@ -11624,16 +11651,20 @@
           currentScreen
         });
         if (showMsg) toast('System saved.', 'success');
-      } catch (e) { console.warn('localStorage save error:', e); }
+      } catch (e) {
+        console.error('[SAVE] writing to Supabase failed', e);
+        toast('Save failed: Supabase write error.', 'error');
+      }
     }
 
     // ═══════════════════════════════════════════════════
-    // LOAD — Supabase/localStorage (text) + IndexedDB (images)
+    // LOAD — Supabase only (text) + IndexedDB/Supabase Storage (images)
     // ═══════════════════════════════════════════════════
     async function loadFromLS() {
       try {
         const d = MJPersistence.getJSONSync(LS_DATA, null);
         if (!d) return;
+        console.log('[DATA SOURCE] loaded from Supabase', { key: LS_DATA });
 
         // Text settings
         if (d.theme) document.documentElement.setAttribute('data-theme', d.theme);
@@ -11704,7 +11735,10 @@
           if (src) applyPageBannerImg(bid, src);
         }
 
-      } catch (e) { console.warn('Load error:', e); }
+      } catch (e) {
+        console.error('[DATA SOURCE] load from Supabase failed', e);
+        toast('Load failed: Supabase read error.', 'error');
+      }
     }
 
     async function clearLS() {
@@ -12881,9 +12915,14 @@
     };
 
     (async function startMjApp() {
-      await MJPersistence.init();
-      const st = MJLicense.bootstrap();
-      if (st === 'activation' || st === 'locked') applyTranslations();
+      try {
+        await MJPersistence.init();
+        const st = MJLicense.bootstrap();
+        if (st === 'activation' || st === 'locked') applyTranslations();
+      } catch (e) {
+        console.error('[DATA SOURCE] Supabase bootstrap failed', e);
+        toast('Supabase is required. Check URL/key, table, and policies.', 'error');
+      }
     })();
 
     document.addEventListener('DOMContentLoaded', function () {
