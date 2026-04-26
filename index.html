@@ -68,6 +68,7 @@
     href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap"
     rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     :root {
       /* ── NEW DESIGN SYSTEM (Homepage V2) ── */
@@ -10092,7 +10093,9 @@
     // INDEXEDDB — Unlimited image storage (~500MB–1GB)
     // ═══════════════════════════════════════════════════
     const DB_NAME = 'mj_v5_idb', DB_VER = 1, IDB_STORE = 'imgs';
+    const MEDIA_BUCKET = 'mj-media';
     let IDB;
+    const MJ_MEDIA_URL_CACHE = new Map();
 
     function openDB() {
       return new Promise((res, rej) => {
@@ -10107,29 +10110,89 @@
       });
     }
     function idbPut(key, val) {
-      if (!IDB) return Promise.resolve();
-      return new Promise((res, rej) => {
-        const tx = IDB.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).put(val, key);
-        tx.oncomplete = res;
-        tx.onerror = e => { console.warn('idbPut error', key, e); rej(e); };
+      return new Promise(async (res, rej) => {
+        try {
+          // Keep local copy for offline/fallback.
+          if (IDB) {
+            const tx = IDB.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).put(val, key);
+            await new Promise((ok, bad) => {
+              tx.oncomplete = ok;
+              tx.onerror = bad;
+            });
+          }
+
+          // Cloud sync for cross-device media persistence.
+          const sb = MJPersistence?.getClient?.();
+          if (sb && typeof val === 'string' && val.startsWith('data:')) {
+            const path = `assets/${encodeURIComponent(key)}`;
+            const blob = dataURLToBlob(val);
+            const { error } = await sb.storage.from(MEDIA_BUCKET).upload(path, blob, {
+              upsert: true,
+              contentType: blob.type || 'image/png'
+            });
+            if (error) throw error;
+            MJ_MEDIA_URL_CACHE.delete(key);
+          }
+          res();
+        } catch (e) {
+          console.warn('idbPut error', key, e);
+          rej(e);
+        }
       });
     }
     function idbGet(key) {
-      if (!IDB) return Promise.resolve(null);
-      return new Promise((res) => {
-        const tx = IDB.transaction(IDB_STORE, 'readonly');
-        const r = tx.objectStore(IDB_STORE).get(key);
-        r.onsuccess = e => res(e.target.result || null);
-        r.onerror = () => res(null);
+      return new Promise(async (res) => {
+        try {
+          if (MJ_MEDIA_URL_CACHE.has(key)) return res(MJ_MEDIA_URL_CACHE.get(key));
+
+          // Prefer cloud source to make images available on all devices.
+          const sb = MJPersistence?.getClient?.();
+          if (sb) {
+            const path = `assets/${encodeURIComponent(key)}`;
+            const { data, error } = await sb.storage.from(MEDIA_BUCKET).download(path);
+            if (!error && data) {
+              const objUrl = URL.createObjectURL(data);
+              MJ_MEDIA_URL_CACHE.set(key, objUrl);
+              return res(objUrl);
+            }
+          }
+
+          if (!IDB) return res(null);
+          const tx = IDB.transaction(IDB_STORE, 'readonly');
+          const r = tx.objectStore(IDB_STORE).get(key);
+          r.onsuccess = e => res(e.target.result || null);
+          r.onerror = () => res(null);
+        } catch {
+          if (!IDB) return res(null);
+          const tx = IDB.transaction(IDB_STORE, 'readonly');
+          const r = tx.objectStore(IDB_STORE).get(key);
+          r.onsuccess = e => res(e.target.result || null);
+          r.onerror = () => res(null);
+        }
       });
     }
     function idbDel(key) {
-      if (!IDB) return Promise.resolve();
-      return new Promise((res, rej) => {
-        const tx = IDB.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).delete(key);
-        tx.oncomplete = res; tx.onerror = rej;
+      return new Promise(async (res, rej) => {
+        try {
+          MJ_MEDIA_URL_CACHE.delete(key);
+          if (IDB) {
+            const tx = IDB.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).delete(key);
+            await new Promise((ok, bad) => {
+              tx.oncomplete = ok;
+              tx.onerror = bad;
+            });
+          }
+          const sb = MJPersistence?.getClient?.();
+          if (sb) {
+            const path = `assets/${encodeURIComponent(key)}`;
+            await sb.storage.from(MEDIA_BUCKET).remove([path]);
+          }
+          res();
+        } catch (e) {
+          rej(e);
+        }
       });
     }
     function idbClear() {
@@ -10139,6 +10202,18 @@
         tx.objectStore(IDB_STORE).clear();
         tx.oncomplete = res; tx.onerror = rej;
       });
+    }
+
+    function dataURLToBlob(dataUrl) {
+      const parts = dataUrl.split(',');
+      const meta = parts[0] || '';
+      const b64 = parts[1] || '';
+      const mimeMatch = meta.match(/data:(.*?);base64/);
+      const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: mime });
     }
     // Image key naming convention
     const imgKey = {
@@ -10161,6 +10236,104 @@
     const MJ_APPROVAL_CODE = 'MJ-APPROVED-2026';
     const LS_LICENSE = 'mj_v5_license';
     const LS_DATA = 'mj_v5_data';
+
+    // Supabase-backed persistence with localStorage fallback.
+    const MJPersistence = (() => {
+      const CFG = {
+        URL: 'https://iqzzuyprmqsopzkegmoh.supabase.co',
+        ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxenp1eXBybXFzb3B6a2VnbW9oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1Njg0MzMsImV4cCI6MjA5MjE0NDQzM30.vBmziYb6v8DBjzkS1sF0jnDT9D-rh-G1PcF9neRe8Xk',
+        TABLE: 'mj_app_state'
+      };
+      const cache = new Map();
+      let client = null;
+      let ready = false;
+
+      function canUseSupabase() {
+        return typeof window.supabase !== 'undefined' &&
+          CFG.URL.includes('.supabase.co') &&
+          !CFG.URL.includes('YOUR_PROJECT_ID') &&
+          CFG.ANON_KEY &&
+          !CFG.ANON_KEY.includes('YOUR_SUPABASE_ANON_KEY');
+      }
+
+      function readLS(key) {
+        try { return localStorage.getItem(key); } catch { return null; }
+      }
+      function writeLS(key, val) {
+        try { localStorage.setItem(key, val); } catch { }
+      }
+
+      async function init() {
+        if (ready) return;
+        ready = true;
+        if (!canUseSupabase()) return;
+        try {
+          client = window.supabase.createClient(CFG.URL, CFG.ANON_KEY);
+          const keys = ['mj_admin', LS_DATA, 'mj_portal_v1', 'mj_pricing_v1'];
+          const { data, error } = await client
+            .from(CFG.TABLE)
+            .select('key,value')
+            .in('key', keys);
+          if (error) throw error;
+          (data || []).forEach(row => {
+            const raw = typeof row.value === 'string' ? row.value : JSON.stringify(row.value);
+            cache.set(row.key, raw);
+            writeLS(row.key, raw);
+          });
+        } catch (e) {
+          console.warn('Supabase init fallback to localStorage:', e?.message || e);
+          client = null;
+        }
+      }
+
+      function getRawSync(key) {
+        if (cache.has(key)) return cache.get(key);
+        const ls = readLS(key);
+        if (ls !== null) cache.set(key, ls);
+        return ls;
+      }
+
+      function getJSONSync(key, fallback) {
+        const raw = getRawSync(key);
+        if (!raw) return fallback;
+        try { return JSON.parse(raw); } catch { return fallback; }
+      }
+
+      function getTextSync(key, fallback = null) {
+        const raw = getRawSync(key);
+        return raw === null ? fallback : raw;
+      }
+
+      async function setRaw(key, raw) {
+        cache.set(key, raw);
+        writeLS(key, raw);
+        if (!client) return;
+        try {
+          let payload = raw;
+          try { payload = JSON.parse(raw); } catch { }
+          await client.from(CFG.TABLE).upsert(
+            { key, value: payload, updated_at: new Date().toISOString() },
+            { onConflict: 'key' }
+          );
+        } catch (e) {
+          console.warn(`Supabase write failed for ${key}:`, e?.message || e);
+        }
+      }
+
+      async function setJSON(key, value) { await setRaw(key, JSON.stringify(value)); }
+      async function setText(key, value) { await setRaw(key, String(value)); }
+
+      async function remove(key) {
+        cache.delete(key);
+        try { localStorage.removeItem(key); } catch { }
+        if (!client) return;
+        try { await client.from(CFG.TABLE).delete().eq('key', key); } catch { }
+      }
+
+      function getClient() { return client; }
+
+      return { init, getJSONSync, getTextSync, setJSON, setText, remove, getClient };
+    })();
 
     const MJLicense = (() => {
       const S = {
@@ -10287,7 +10460,7 @@
         // CLIENT MODE: Public visitors always bypass the license gate.
         // The license system is for the designer's own device activation — not for clients.
         // In client mode (non-admin), we skip the license overlay entirely.
-        const isAdmin = localStorage.getItem('mj_admin') === 'true';
+        const isAdmin = MJPersistence.getTextSync('mj_admin') === 'true';
         if (!isAdmin) {
           // Hide license overlay and locked overlay immediately for public visitors
           const overlay = document.getElementById('license-overlay');
@@ -11419,11 +11592,11 @@
     }
 
     // ═══════════════════════════════════════════════════
-    // SAVE — localStorage (text only, no images)
+    // SAVE — Supabase (with localStorage fallback) (text only, no images)
     // ═══════════════════════════════════════════════════
     function saveToLS(showMsg) {
       try {
-        localStorage.setItem(LS_DATA, JSON.stringify({
+        MJPersistence.setJSON(LS_DATA, {
           theme: document.documentElement.getAttribute('data-theme'),
           sysName: document.getElementById('sys-name').textContent,
           sysTagline: document.getElementById('sys-tagline').textContent,
@@ -11447,19 +11620,18 @@
           contactEmail: document.getElementById('contact-email')?.textContent,
           contactWa: document.getElementById('contact-wa')?.textContent,
           currentScreen
-        }));
+        });
         if (showMsg) toast('System saved.', 'success');
       } catch (e) { console.warn('localStorage save error:', e); }
     }
 
     // ═══════════════════════════════════════════════════
-    // LOAD — localStorage (text) + IndexedDB (images)
+    // LOAD — Supabase/localStorage (text) + IndexedDB (images)
     // ═══════════════════════════════════════════════════
     async function loadFromLS() {
       try {
-        const raw = localStorage.getItem(LS_DATA);
-        if (!raw) return;
-        const d = JSON.parse(raw);
+        const d = MJPersistence.getJSONSync(LS_DATA, null);
+        if (!d) return;
 
         // Text settings
         if (d.theme) document.documentElement.setAttribute('data-theme', d.theme);
@@ -11535,7 +11707,7 @@
 
     async function clearLS() {
       if (!confirm(currentLang === 'ar' ? 'مسح كل البيانات وإعادة الضبط؟' : 'Clear all data and reset the system?')) return;
-      localStorage.removeItem(LS_DATA);
+      await MJPersistence.remove(LS_DATA);
       localStorage.removeItem('mj_v5_onboarded');
       await idbClear();
       toast('Data cleared. Refreshing…', 'error');
@@ -12706,7 +12878,8 @@
       applyFooterTranslations();
     };
 
-    (function startMjApp() {
+    (async function startMjApp() {
+      await MJPersistence.init();
       const st = MJLicense.bootstrap();
       if (st === 'activation' || st === 'locked') applyTranslations();
     })();
@@ -12738,7 +12911,7 @@
 
         // ─── Bootstrap ───────────────────────────────────
         init() {
-          const isAdmin = localStorage.getItem(LS_KEY) === 'true';
+          const isAdmin = MJPersistence.getTextSync(LS_KEY) === 'true';
           const urlParams = new URLSearchParams(window.location.search);
           const wantsAdmin = urlParams.get('admin') === 'true';
 
@@ -12828,7 +13001,7 @@
           inp.classList.remove('error');
 
           if (_chk(val)) {
-            localStorage.setItem(LS_KEY, 'true');
+            MJPersistence.setText(LS_KEY, 'true');
             inp.value = '';
             MJAdmin._hideLoginScreen();
             // Smooth transition
@@ -12862,7 +13035,7 @@
         // ─── Logout ──────────────────────────────────────
         logout() {
           if (!confirm('Exit Admin Mode and return to Client View?')) return;
-          localStorage.removeItem(LS_KEY);
+          MJPersistence.remove(LS_KEY);
           document.body.style.opacity = '0';
           document.body.style.transition = 'opacity .25s ease';
           setTimeout(() => {
@@ -12887,7 +13060,7 @@
               setTimeout(() => logo.classList.remove('secret-flash'), 180);
               if (_logoClickCount >= 5) {
                 _logoClickCount = 0;
-                const isAdmin = localStorage.getItem(LS_KEY) === 'true';
+                const isAdmin = MJPersistence.getTextSync(LS_KEY) === 'true';
                 if (!isAdmin) {
                   MJAdmin._showLoginScreen();
                 }
@@ -12919,7 +13092,7 @@
       window.MJAdmin = MJAdmin;
 
       // ════════════════════════════════════════════════════
-      //  PORTAL ENGINE — fully dynamic, localStorage backed
+      //  PORTAL ENGINE — fully dynamic, Supabase backed
       // ════════════════════════════════════════════════════
       const PORTAL_LS = 'mj_portal_v1';
 
@@ -12944,12 +13117,11 @@
       };
 
       function loadPortalData() {
-        try { return JSON.parse(localStorage.getItem(PORTAL_LS)) || PORTAL_DEFAULT; }
-        catch { return PORTAL_DEFAULT; }
+        return MJPersistence.getJSONSync(PORTAL_LS, PORTAL_DEFAULT);
       }
 
       function savePortalData(data) {
-        localStorage.setItem(PORTAL_LS, JSON.stringify(data));
+        MJPersistence.setJSON(PORTAL_LS, data);
       }
 
       function renderPortalTimeline() {
@@ -13169,10 +13341,9 @@
       let pricingCurrency = 'egp';
 
       function loadPricingData() {
-        try { return JSON.parse(localStorage.getItem(PRICING_LS)) || PRICING_DEFAULT; }
-        catch { return PRICING_DEFAULT; }
+        return MJPersistence.getJSONSync(PRICING_LS, PRICING_DEFAULT);
       }
-      function savePricingDataLS(data) { localStorage.setItem(PRICING_LS, JSON.stringify(data)); }
+      function savePricingDataLS(data) { MJPersistence.setJSON(PRICING_LS, data); }
 
       function renderPricingCards() {
         const d = loadPricingData();
@@ -13262,7 +13433,7 @@
 
         const params = new URLSearchParams(window.location.search);
         const showPortal = params.get('portal') === 'true';
-        const isAdmin = localStorage.getItem('mj_admin') === 'true';
+        const isAdmin = MJPersistence.getTextSync('mj_admin') === 'true';
 
         // Show portal nav if client was sent portal link
         if (showPortal) {
