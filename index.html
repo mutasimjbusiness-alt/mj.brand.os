@@ -10096,6 +10096,8 @@
     const MEDIA_BUCKET = 'mj-media';
     let IDB;
     const MJ_MEDIA_URL_CACHE = new Map();
+    const MJ_MEDIA_EXISTS_CACHE = new Set();
+    const MJ_MEDIA_MISSING_CACHE = new Set();
 
     function openDB() {
       return new Promise((res, rej) => {
@@ -10130,8 +10132,8 @@
             return rej(err);
           }
           if (sb && typeof val === 'string' && val.startsWith('data:')) {
-            const path = `assets/${encodeURIComponent(key)}`;
             const blob = dataURLToBlob(val);
+            const path = buildMediaPath(key, blob.type);
             console.log('[Storage][upload] start', { bucket: MEDIA_BUCKET, path, key, size: blob.size, type: blob.type });
             const { data, error } = await sb.storage.from(MEDIA_BUCKET).upload(path, blob, {
               upsert: true,
@@ -10142,6 +10144,8 @@
               return rej(error);
             }
             console.log('[Storage][upload] success', { bucket: MEDIA_BUCKET, path, key, response: data });
+            MJ_MEDIA_EXISTS_CACHE.add(path);
+            MJ_MEDIA_MISSING_CACHE.delete(path);
             MJ_MEDIA_URL_CACHE.delete(key);
           }
           res();
@@ -10159,16 +10163,21 @@
           // Prefer cloud source to make images available on all devices.
           const sb = MJPersistence?.getClient?.();
           if (sb) {
-            const path = `assets/${encodeURIComponent(key)}`;
-            const { data, error } = await sb.storage.from(MEDIA_BUCKET).download(path);
-            if (error) {
-              console.error('[Storage][download] error', { bucket: MEDIA_BUCKET, path, key, error });
-            }
-            if (!error && data) {
-              const objUrl = URL.createObjectURL(data);
-              MJ_MEDIA_URL_CACHE.set(key, objUrl);
-              console.log('[Storage][download] success', { bucket: MEDIA_BUCKET, path, key, bytes: data.size || null });
-              return res(objUrl);
+            const candidatePaths = buildMediaCandidatePaths(key);
+            for (const path of candidatePaths) {
+              const exists = await mediaObjectExists(sb, path);
+              if (!exists) continue;
+              const { data, error } = await sb.storage.from(MEDIA_BUCKET).download(path);
+              if (error) {
+                console.error('[Storage][download] error', { bucket: MEDIA_BUCKET, path, key, error });
+                continue;
+              }
+              if (data) {
+                const objUrl = URL.createObjectURL(data);
+                MJ_MEDIA_URL_CACHE.set(key, objUrl);
+                console.log('[Storage][download] success', { bucket: MEDIA_BUCKET, path, key, bytes: data.size || null });
+                return res(objUrl);
+              }
             }
           }
 
@@ -10200,14 +10209,18 @@
           }
           const sb = MJPersistence?.getClient?.();
           if (sb) {
-            const path = `assets/${encodeURIComponent(key)}`;
-            console.log('[Storage][delete] start', { bucket: MEDIA_BUCKET, path, key });
-            const { data, error } = await sb.storage.from(MEDIA_BUCKET).remove([path]);
-            if (error) {
-              console.error('[Storage][delete] error', { bucket: MEDIA_BUCKET, path, key, error });
-              return rej(error);
+            const paths = buildMediaCandidatePaths(key);
+            for (const path of paths) {
+              console.log('[Storage][delete] start', { bucket: MEDIA_BUCKET, path, key });
+              const { data, error } = await sb.storage.from(MEDIA_BUCKET).remove([path]);
+              if (error) {
+                console.error('[Storage][delete] error', { bucket: MEDIA_BUCKET, path, key, error });
+                continue;
+              }
+              console.log('[Storage][delete] success', { bucket: MEDIA_BUCKET, path, key, response: data });
+              MJ_MEDIA_EXISTS_CACHE.delete(path);
+              MJ_MEDIA_MISSING_CACHE.delete(path);
             }
-            console.log('[Storage][delete] success', { bucket: MEDIA_BUCKET, path, key, response: data });
           }
           res();
         } catch (e) {
@@ -10235,6 +10248,43 @@
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       return new Blob([bytes], { type: mime });
+    }
+    function extFromMime(mime) {
+      const m = (mime || '').toLowerCase();
+      if (m.includes('jpeg') || m.includes('jpg')) return 'jpg';
+      if (m.includes('png')) return 'png';
+      if (m.includes('webp')) return 'webp';
+      if (m.includes('gif')) return 'gif';
+      return 'bin';
+    }
+    function buildMediaPath(key, mime) {
+      return `assets/${encodeURIComponent(key)}.${extFromMime(mime)}`;
+    }
+    function buildMediaCandidatePaths(key) {
+      const safe = encodeURIComponent(key);
+      return [
+        `assets/${safe}.jpg`,
+        `assets/${safe}.png`,
+        `assets/${safe}.webp`,
+        `assets/${safe}.gif`,
+        `assets/${safe}.bin`,
+        `assets/${safe}` // legacy path without extension
+      ];
+    }
+    async function mediaObjectExists(sb, path) {
+      if (MJ_MEDIA_EXISTS_CACHE.has(path)) return true;
+      if (MJ_MEDIA_MISSING_CACHE.has(path)) return false;
+      const fileName = path.split('/').pop();
+      const { data, error } = await sb.storage.from(MEDIA_BUCKET).list('assets', { search: fileName, limit: 100 });
+      if (error) {
+        console.error('[Storage][list] error', { bucket: MEDIA_BUCKET, path, error });
+        MJ_MEDIA_MISSING_CACHE.add(path);
+        return false;
+      }
+      const exists = (data || []).some(item => item?.name === fileName);
+      if (exists) MJ_MEDIA_EXISTS_CACHE.add(path); else MJ_MEDIA_MISSING_CACHE.add(path);
+      console.log('[Storage][list] check', { bucket: MEDIA_BUCKET, path, exists });
+      return exists;
     }
     // Image key naming convention
     const imgKey = {
@@ -11623,7 +11673,16 @@
     // ═══════════════════════════════════════════════════
     // SAVE — Supabase only (text only, no images)
     // ═══════════════════════════════════════════════════
+    let isSaving = false;
+    let saveQueued = false;
+    let saveQueuedShowMsg = false;
     async function saveToLS(showMsg) {
+      if (isSaving) {
+        saveQueued = true;
+        saveQueuedShowMsg = saveQueuedShowMsg || !!showMsg;
+        return;
+      }
+      isSaving = true;
       try {
         await MJPersistence.setJSON(LS_DATA, {
           theme: document.documentElement.getAttribute('data-theme'),
@@ -11654,6 +11713,14 @@
       } catch (e) {
         console.error('[SAVE] writing to Supabase failed', e);
         toast('Save failed: Supabase write error.', 'error');
+      } finally {
+        isSaving = false;
+        if (saveQueued) {
+          const nextShowMsg = saveQueuedShowMsg;
+          saveQueued = false;
+          saveQueuedShowMsg = false;
+          setTimeout(() => { saveToLS(nextShowMsg); }, 0);
+        }
       }
     }
 
