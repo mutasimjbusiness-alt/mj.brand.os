@@ -13014,6 +13014,7 @@
       const LS_KEY = 'mj_admin';
       let _logoClickCount = 0;
       let _logoClickTimer = null;
+      let _logoSecretBound = false;
 
       const MJAdmin = {
 
@@ -13153,29 +13154,35 @@
         },
 
         // ─── Hidden Trigger: 5× logo clicks ──────────────
-        _attachLogoClickSecret() {
-          const logos = [
-            document.querySelector('.sidebar-logo'),
-            document.getElementById('tn-logo-center')
-          ].filter(Boolean);
+        _onSecretLogoClick(logo) {
+          _logoClickCount++;
+          clearTimeout(_logoClickTimer);
+          console.log('[ADMIN CLICK] count', _logoClickCount);
 
-          logos.forEach(logo => {
-            logo.addEventListener('click', function (e) {
-              _logoClickCount++;
-              clearTimeout(_logoClickTimer);
-              // Flash visual feedback on each click
-              logo.classList.add('secret-flash');
-              setTimeout(() => logo.classList.remove('secret-flash'), 180);
-              if (_logoClickCount >= 5) {
-                _logoClickCount = 0;
-                const isAdmin = MJPersistence.getTextSync(LS_KEY) === 'true';
-                if (!isAdmin) {
-                  MJAdmin._showLoginScreen();
-                }
-              } else {
-                _logoClickTimer = setTimeout(() => { _logoClickCount = 0; }, 2000);
-              }
-            });
+          // Flash visual feedback on each click
+          if (logo) {
+            logo.classList.add('secret-flash');
+            setTimeout(() => logo.classList.remove('secret-flash'), 180);
+          }
+
+          if (_logoClickCount >= 5) {
+            _logoClickCount = 0;
+            console.log('[ADMIN UNLOCK TRIGGERED]');
+            const isAdmin = MJPersistence.getTextSync(LS_KEY) === 'true';
+            if (!isAdmin) MJAdmin._showLoginScreen();
+            return;
+          }
+          _logoClickTimer = setTimeout(() => { _logoClickCount = 0; }, 2000);
+        },
+        _attachLogoClickSecret() {
+          if (_logoSecretBound) return;
+          _logoSecretBound = true;
+
+          // Delegated listener handles current + future logo nodes.
+          document.addEventListener('click', function (e) {
+            const logo = e.target?.closest?.('.sidebar-logo, #tn-logo-center');
+            if (!logo) return;
+            MJAdmin._onSecretLogoClick(logo);
           });
         },
 
