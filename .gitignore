@@ -1,0 +1,10 @@
+# ═══ MJ Brand OS — Git Ignore ═══
+# This file tells GitHub: "Don't upload these files"
+
+# Your personal passwords and API keys
+config.js
+
+# System files (not needed)
+node_modules/
+.cursor/
+*.log
