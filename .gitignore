@@ -1,0 +1,18 @@
+# ═══ MJ Brand OS — Git Ignore ═══
+# This file tells GitHub: "Don't upload these files"
+
+# Temporary and test files
+execute_sql.js
+run_migrations.bat
+update_v6.js
+
+# System files (not needed)
+node_modules/
+.cursor/
+.DS_Store
+*.log
+.git/
+.vscode/
+.env
+.env.local
+*.secret
