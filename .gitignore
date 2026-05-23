@@ -1,10 +1,21 @@
 # ═══ MJ Brand OS — Git Ignore ═══
 # This file tells GitHub: "Don't upload these files"
 
-# Your personal passwords and API keys
+# Your personal passwords and API keys - NEVER COMMIT THESE!
 config.js
+.env
+.env.local
+*.secret
+
+# Temporary and test files
+execute_sql.js
+run_migrations.bat
+update_v6.js
 
 # System files (not needed)
 node_modules/
 .cursor/
+.DS_Store
 *.log
+.git/
+.vscode/

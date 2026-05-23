@@ -67,8 +67,9 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap"
     rel="stylesheet">
-
+  <script src="config.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase-js.min.js"></script>
   <style>
     :root {
       /* ── NEW DESIGN SYSTEM (Homepage V2) ── */
@@ -11258,6 +11259,22 @@
     const EMAILJS_TEMPLATE_ID = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.emailjs.templateId : '';
     const EMAILJS_ACTIVATION_TEMPLATE_ID = EMAILJS_TEMPLATE_ID;
 
+    const SUPABASE_URL = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.url : '';
+    const SUPABASE_ANON_KEY = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.anonKey : '';
+    const SUPABASE_BUCKET = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.bucket : 'mj-media';
+    const SUPABASE_APP_STATE_TABLE = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.appStateTable : 'mj_app_state';
+    const SUPABASE_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY && (typeof MJ_CONFIG !== 'undefined' ? MJ_CONFIG.supabase.enabled : false));
+    let supabaseClient = null;
+    if (SUPABASE_ENABLED) {
+      const lib = window.supabase || window.Supabase;
+      if (lib && typeof lib.createClient === 'function') {
+        supabaseClient = lib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        console.log('Supabase initialized');
+      } else {
+        console.warn('Supabase script not loaded or unsupported version');
+      }
+    }
+
     // ═══════════════════════════════════════════════════
     // INDEXEDDB — Config-driven storage
     // ═══════════════════════════════════════════════════
@@ -11311,6 +11328,57 @@
         tx.objectStore(IDB_STORE).clear();
         tx.oncomplete = res; tx.onerror = rej;
       });
+    }
+
+    async function uploadToSupabaseStorage(file, path) {
+      if (!supabaseClient || !SUPABASE_ENABLED) return null;
+      try {
+        const { data, error } = await supabaseClient.storage.from(SUPABASE_BUCKET).upload(path, file, { upsert: true });
+        if (error) {
+          console.warn('Supabase upload error', error);
+          return null;
+        }
+        const { data: pub } = supabaseClient.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
+        return pub?.publicUrl || null;
+      } catch (err) {
+        console.warn('Supabase upload failed', err);
+        return null;
+      }
+    }
+
+    async function supabaseUpsertAppState(key, value) {
+      if (!supabaseClient || !SUPABASE_ENABLED) return false;
+      try {
+        const { error } = await supabaseClient.from(SUPABASE_APP_STATE_TABLE).upsert({ key, value });
+        if (error) {
+          console.warn('Supabase app-state save error', error);
+          return false;
+        }
+        return true;
+      } catch (err) {
+        console.warn('Supabase app-state save failed', err);
+        return false;
+      }
+    }
+
+    async function supabaseGetAppState(key) {
+      if (!supabaseClient || !SUPABASE_ENABLED) return null;
+      try {
+        const { data, error } = await supabaseClient.from(SUPABASE_APP_STATE_TABLE).select('value').eq('key', key).single();
+        if (error) {
+          if (error?.details && error.details.includes('No rows returned')) return null;
+          console.warn('Supabase app-state load error', error);
+          return null;
+        }
+        return data?.value || null;
+      } catch (err) {
+        console.warn('Supabase app-state load failed', err);
+        return null;
+      }
+    }
+
+    function sanitizeFilename(name) {
+      return String(name).replace(/[^a-zA-Z0-9-_.]/g, '_');
     }
     // Image key naming convention
     const imgKey = {
@@ -11925,6 +11993,10 @@
       if (b) {
         b.hasImg = true;
         await idbPut(imgKey.hero() + '_' + id, src);
+        if (SUPABASE_ENABLED && supabaseClient) {
+          const remoteUrl = await uploadToSupabaseStorage(f, `hero/${id}-${Date.now()}-${sanitizeFilename(f.name)}`);
+          if (remoteUrl) b.remoteImg = remoteUrl;
+        }
         saveToLS();
         const currentIdx = activeSlideIndex;
         renderHeroSlider();
@@ -11960,6 +12032,10 @@
       img.src = src; img.style.display = 'block';
       document.getElementById('avatar-placeholder').style.display = 'none';
       await idbPut(imgKey.avatar(), src);
+      if (SUPABASE_ENABLED && supabaseClient) {
+        const remoteUrl = await uploadToSupabaseStorage(f, `avatar/${Date.now()}-${sanitizeFilename(f.name)}`);
+        if (remoteUrl) console.log('Supabase avatar mirror saved:', remoteUrl);
+      }
       saveToLS();
       toast('Photo saved.', 'success');
     }
@@ -11972,6 +12048,10 @@
       const src = await readFileAsDataURL(f);
       applyServiceBannerImg(svcId, src);
       await idbPut(imgKey.svc(svcId), src);
+      if (SUPABASE_ENABLED && supabaseClient) {
+        const remoteUrl = await uploadToSupabaseStorage(f, `service/${svcId}-${Date.now()}-${sanitizeFilename(f.name)}`);
+        if (remoteUrl) console.log('Supabase service banner mirror saved:', remoteUrl);
+      }
       saveToLS();
       toast('Banner saved.', 'success');
     }
@@ -11984,6 +12064,10 @@
       const src = await readFileAsDataURL(f);
       applyPageBannerImg(bannerId, src);
       await idbPut(imgKey.pageBanner(bannerId), src);
+      if (SUPABASE_ENABLED && supabaseClient) {
+        const remoteUrl = await uploadToSupabaseStorage(f, `page-banner/${bannerId}-${Date.now()}-${sanitizeFilename(f.name)}`);
+        if (remoteUrl) console.log('Supabase page banner mirror saved:', remoteUrl);
+      }
       saveToLS();
       toast('Banner saved.', 'success');
     }
@@ -12160,15 +12244,17 @@
       renderProjects();
     }
     function openAddPortModal() { openModal('modal-add-port'); }
-    let pendingPortThumb = null, pendingPortAvatar = null;
+    let pendingPortThumb = null, pendingPortAvatar = null, pendingPortThumbFile = null, pendingPortAvatarFile = null;
     function previewPortThumb(input) {
       const f = input.files[0]; if (!f) return;
+      pendingPortThumbFile = f;
       const r = new FileReader();
       r.onload = e => { pendingPortThumb = e.target.result; const pr = document.getElementById('port-thumb-preview'); pr.style.display = 'flex'; document.getElementById('port-thumb-name').textContent = '✓ ' + f.name; };
       r.readAsDataURL(f);
     }
     function previewPortAvatar(input) {
       const f = input.files[0]; if (!f) return;
+      pendingPortAvatarFile = f;
       const r = new FileReader(); r.onload = e => { pendingPortAvatar = e.target.result; }; r.readAsDataURL(f);
     }
     async function addPortEntry() {
@@ -12177,9 +12263,17 @@
       const entry = { id, title, desc: document.getElementById('port-desc-inp').value || 'Project description.', type: document.getElementById('port-type-inp').value || 'Brand Project', thumb: pendingPortThumb, avatar: pendingPortAvatar, bg: '#0e1e30' };
       if (pendingPortThumb) await idbPut(imgKey.portThumb(id), pendingPortThumb);
       if (pendingPortAvatar) await idbPut(imgKey.portAvatar(id), pendingPortAvatar);
+      if (SUPABASE_ENABLED && supabaseClient && pendingPortThumbFile) {
+        const remoteUrl = await uploadToSupabaseStorage(pendingPortThumbFile, `portfolio/${id}/thumb-${Date.now()}-${sanitizeFilename(pendingPortThumbFile.name)}`);
+        if (remoteUrl) entry.remoteThumb = remoteUrl;
+      }
+      if (SUPABASE_ENABLED && supabaseClient && pendingPortAvatarFile) {
+        const remoteUrl = await uploadToSupabaseStorage(pendingPortAvatarFile, `portfolio/${id}/avatar-${Date.now()}-${sanitizeFilename(pendingPortAvatarFile.name)}`);
+        if (remoteUrl) entry.remoteAvatar = remoteUrl;
+      }
       portfolioEntries.push(entry);
       renderPortfolio(); closeModal('modal-add-port'); toast('Project added.');
-      pendingPortThumb = null; pendingPortAvatar = null;
+      pendingPortThumb = null; pendingPortAvatar = null; pendingPortThumbFile = null; pendingPortAvatarFile = null;
       ['port-title-inp', 'port-desc-inp', 'port-type-inp'].forEach(id => document.getElementById(id).value = '');
       document.getElementById('port-thumb-preview').style.display = 'none';
       saveToLS();
@@ -12213,6 +12307,13 @@
         const idx = p.gallery.length;
         p.gallery.push(src);
         await idbPut(imgKey.gallery(id, idx), src);
+        if (SUPABASE_ENABLED && supabaseClient) {
+          const remoteUrl = await uploadToSupabaseStorage(f, `portfolio/${id}/gallery/${idx}-${Date.now()}-${sanitizeFilename(f.name)}`);
+          if (remoteUrl) {
+            if (!p.galleryRemoteUrls) p.galleryRemoteUrls = [];
+            p.galleryRemoteUrls.push(remoteUrl);
+          }
+        }
         const item = document.createElement('div'); item.className = 'gallery-item'; item.innerHTML = `<img src="${src}" alt="">`;
         const add = document.querySelector('.gallery-add-zone');
         document.getElementById('pp-gallery').insertBefore(item, add);
@@ -12414,10 +12515,12 @@
     // ═══════════════════════════════════════════════════
     // BLOG CONTENT MANAGEMENT
     // ═══════════════════════════════════════════════════
-    let pendingBlogThumb = null, pendingBlogBanner = null;
+    let pendingBlogThumb = null, pendingBlogBanner = null, pendingBlogThumbFile = null, pendingBlogBannerFile = null;
 
     function previewBlogImage(input, previewId) {
       const f = input.files[0]; if (!f) return;
+      if (previewId === 'mb-thumb-preview') pendingBlogThumbFile = f;
+      else pendingBlogBannerFile = f;
       const r = new FileReader();
       r.onload = e => {
         if (previewId === 'mb-thumb-preview') pendingBlogThumb = e.target.result;
@@ -12429,7 +12532,7 @@
     }
 
     function openBlogAdmin(id = null) {
-      pendingBlogThumb = null; pendingBlogBanner = null;
+      pendingBlogThumb = null; pendingBlogBanner = null; pendingBlogThumbFile = null; pendingBlogBannerFile = null;
       document.getElementById('mb-thumb-preview').style.display = 'none';
       document.getElementById('mb-thumb-upload').value = '';
       document.getElementById('mb-banner-preview').style.display = 'none';
@@ -12497,6 +12600,14 @@
 
       if (pendingBlogThumb) await idbPut(imgKey.blogThumb(id), pendingBlogThumb);
       if (pendingBlogBanner) await idbPut(imgKey.blogBanner(id), pendingBlogBanner);
+      if (SUPABASE_ENABLED && supabaseClient && pendingBlogThumbFile) {
+        const remoteUrl = await uploadToSupabaseStorage(pendingBlogThumbFile, `blogs/${id}/thumb-${Date.now()}-${sanitizeFilename(pendingBlogThumbFile.name)}`);
+        if (remoteUrl) p.remoteThumb = remoteUrl;
+      }
+      if (SUPABASE_ENABLED && supabaseClient && pendingBlogBannerFile) {
+        const remoteUrl = await uploadToSupabaseStorage(pendingBlogBannerFile, `blogs/${id}/banner-${Date.now()}-${sanitizeFilename(pendingBlogBannerFile.name)}`);
+        if (remoteUrl) p.remoteBanner = remoteUrl;
+      }
 
       if (isNew) blogsData.unshift(p);
       else blogsData = blogsData.map(x => x.id === id ? p : x);
@@ -12559,9 +12670,9 @@
       params.message = `Service: ${params.service || 'N/A'}\nBudget: ${params.budget || 'N/A'}\nCompany: ${params.company || 'N/A'}\nSource: ${params.source || 'N/A'}\n\n${params.message}`;
 
       try {
-        if (!EMAILJS_TEMPLATE_ID || !EMAILJS_SERVICE_ID) {
-          // EmailJS not configured in config.js — show success UI anyway
-          throw new Error('EmailJS not configured');
+        if (EMAILJS_TEMPLATE_ID === 'YOUR_TEMPLATE_ID') {
+          // Template ID not yet set — show success UI anyway
+          throw new Error('Template ID pending');
         }
         await emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, params);
         showFormSuccess();
@@ -12593,32 +12704,36 @@
     // SAVE — localStorage (text only, no images)
     // ═══════════════════════════════════════════════════
     function saveToLS(showMsg) {
+      const state = {
+        theme: document.documentElement.getAttribute('data-theme'),
+        sysName: document.getElementById('sys-name').textContent,
+        sysTagline: document.getElementById('sys-tagline').textContent,
+        profileName: document.getElementById('profile-name').textContent,
+        profileRole: document.getElementById('profile-role').textContent,
+        projects: projects.map(p => ({ ...p })),
+        // Portfolio: metadata only — images live in IndexedDB
+        portfolio: portfolioEntries.map(p => ({
+          id: p.id, title: p.title, desc: p.desc, type: p.type, bg: p.bg,
+          hasThumb: !!p.thumb, hasAvatar: !!p.avatar,
+          galleryCount: (p.gallery || []).length
+        })),
+        clients: clientsData.map(c => ({ ...c })),
+        blogs: blogsData.map(b => ({
+          id: b.id, title: b.title, excerpt: b.excerpt, content: b.content,
+          category: b.category, featured: b.featured, date: b.date, readTime: b.readTime,
+          hasThumb: b.hasThumb, hasBanner: b.hasBanner
+        })),
+        bannersData: bannersData.map(b => ({ ...b })),
+        philContent: document.getElementById('phil-content').innerHTML,
+        contactEmail: document.getElementById('contact-email')?.textContent,
+        contactWa: document.getElementById('contact-wa')?.textContent,
+        currentScreen
+      };
       try {
-        localStorage.setItem(LS_DATA, JSON.stringify({
-          theme: document.documentElement.getAttribute('data-theme'),
-          sysName: document.getElementById('sys-name').textContent,
-          sysTagline: document.getElementById('sys-tagline').textContent,
-          profileName: document.getElementById('profile-name').textContent,
-          profileRole: document.getElementById('profile-role').textContent,
-          projects: projects.map(p => ({ ...p })),
-          // Portfolio: metadata only — images live in IndexedDB
-          portfolio: portfolioEntries.map(p => ({
-            id: p.id, title: p.title, desc: p.desc, type: p.type, bg: p.bg,
-            hasThumb: !!p.thumb, hasAvatar: !!p.avatar,
-            galleryCount: (p.gallery || []).length
-          })),
-          clients: clientsData.map(c => ({ ...c })),
-          blogs: blogsData.map(b => ({
-            id: b.id, title: b.title, excerpt: b.excerpt, content: b.content,
-            category: b.category, featured: b.featured, date: b.date, readTime: b.readTime,
-            hasThumb: b.hasThumb, hasBanner: b.hasBanner
-          })),
-          bannersData: bannersData.map(b => ({ ...b })),
-          philContent: document.getElementById('phil-content').innerHTML,
-          contactEmail: document.getElementById('contact-email')?.textContent,
-          contactWa: document.getElementById('contact-wa')?.textContent,
-          currentScreen
-        }));
+        localStorage.setItem(LS_DATA, JSON.stringify(state));
+        if (SUPABASE_ENABLED && supabaseClient) {
+          supabaseUpsertAppState('mj_system_state', state).catch(err => console.warn('Supabase state save failed', err));
+        }
         if (showMsg) toast('System saved.', 'success');
       } catch (e) { console.warn('localStorage save error:', e); }
     }
@@ -12628,7 +12743,11 @@
     // ═══════════════════════════════════════════════════
     async function loadFromLS() {
       try {
-        const raw = localStorage.getItem(LS_DATA);
+        let raw = localStorage.getItem(LS_DATA);
+        if (!raw && SUPABASE_ENABLED && supabaseClient) {
+          const remoteState = await supabaseGetAppState('mj_system_state');
+          if (remoteState) raw = JSON.stringify(remoteState);
+        }
         if (!raw) return;
         const d = JSON.parse(raw);
 
