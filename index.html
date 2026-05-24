@@ -11433,10 +11433,17 @@ if (typeof Object.freeze === 'function') {
     const SUPABASE_BUCKET = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.bucket : 'mj-media';
     const SUPABASE_APP_STATE_TABLE = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.appStateTable : 'mj_app_state';
     const SUPABASE_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY && (typeof MJ_CONFIG !== 'undefined' ? MJ_CONFIG.supabase.enabled : false));
+    
+    // Expose to window for debugging and external access
+    window.SUPABASE_URL = SUPABASE_URL;
+    window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
+    window.SUPABASE_BUCKET = SUPABASE_BUCKET;
+    window.SUPABASE_APP_STATE_TABLE = SUPABASE_APP_STATE_TABLE;
+    window.SUPABASE_ENABLED = SUPABASE_ENABLED;
     let supabaseClient = null;
     
     // Supabase REST API wrapper - properly formatted
-    const supabaseAPI = {
+    window.supabaseAPI = {
       async upsert(table, data) {
         if (!SUPABASE_ENABLED) return { data: null, error: new Error('Supabase disabled') };
         try {
@@ -11486,16 +11493,17 @@ if (typeof Object.freeze === 'function') {
     };
     
     // Create client interface
-    supabaseClient = {
+    window.supabaseClient = {
       from: (table) => ({
-        upsert: (data) => supabaseAPI.upsert(table, data),
+        upsert: (data) => window.supabaseAPI.upsert(table, data),
         select: (cols) => ({
           eq: (field, val) => ({
-            single: () => supabaseAPI.select(table, field, val)
+            single: () => window.supabaseAPI.select(table, field, val)
           })
         })
       })
     };
+    supabaseClient = window.supabaseClient;
     
     console.log('✓ Supabase API initialized');
 
