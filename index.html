@@ -11447,13 +11447,15 @@ if (typeof Object.freeze === 'function') {
       async upsert(table, data) {
         if (!SUPABASE_ENABLED) return { data: null, error: new Error('Supabase disabled') };
         try {
-          const url = `${SUPABASE_URL}/rest/v1/${table}?on_conflict=key`;
+          // For Supabase REST API UPSERT: use POST with on_conflict=column and resolution=merge
+          const url = `${SUPABASE_URL}/rest/v1/${table}?on_conflict=key&resolution=merge`;
           const response = await fetch(url, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-              'apikey': SUPABASE_ANON_KEY
+              'apikey': SUPABASE_ANON_KEY,
+              'Prefer': 'resolution=merge'  // Alternative: Prefer header
             },
             body: JSON.stringify(data)
           });
@@ -11463,9 +11465,10 @@ if (typeof Object.freeze === 'function') {
             return { data: null, error: { code: response.status, message: errText } };
           }
           const result = await response.json();
+          console.log('✓ Supabase UPSERT successful:', data.key || 'unnamed');
           return { data: result, error: null };
         } catch (err) {
-          console.warn('Supabase UPSERT failed:', err);
+          console.error('Supabase UPSERT exception:', err.message);
           return { data: null, error: err };
         }
       },
@@ -13103,6 +13106,12 @@ if (typeof Object.freeze === 'function') {
         for (const bid of ['phil-banner', 'about-banner', 'contact-banner', 'svc-detail-banner']) {
           const src = await idbGet(imgKey.pageBanner(bid));
           if (src) applyPageBannerImg(bid, src);
+        }
+        
+        // After successful load from cloud, save to localStorage as cache
+        if (source === 'cloud') {
+          localStorage.setItem(LS_DATA, raw);
+          console.log('✓ Data cached to localStorage after cloud load');
         }
 
       } catch (e) { console.warn('Load error:', e); }
