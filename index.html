@@ -11435,52 +11435,66 @@ if (typeof Object.freeze === 'function') {
     const SUPABASE_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY && (typeof MJ_CONFIG !== 'undefined' ? MJ_CONFIG.supabase.enabled : false));
     let supabaseClient = null;
     
-    // Supabase REST API wrapper (no SDK dependency)
+    // Supabase REST API wrapper - properly formatted
     const supabaseAPI = {
-      async query(table, method, data = null) {
-        if (!SUPABASE_ENABLED) return null;
+      async upsert(table, data) {
+        if (!SUPABASE_ENABLED) return { data: null, error: new Error('Supabase disabled') };
         try {
-          const url = `${SUPABASE_URL}/rest/v1/${table}`;
-          const opts = {
+          const url = `${SUPABASE_URL}/rest/v1/${table}?on_conflict=key`;
+          const response = await fetch(url, {
+            method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-              'apikey': SUPABASE_ANON_KEY,
-              'Prefer': 'return=representation'
+              'apikey': SUPABASE_ANON_KEY
             },
-            method: method
-          };
-          if (data) opts.body = JSON.stringify(data);
-          
-          const response = await fetch(url, opts);
+            body: JSON.stringify(data)
+          });
           if (!response.ok) {
-            console.warn(`Supabase ${method} error:`, response.status, await response.text());
-            return null;
+            const errText = await response.text();
+            console.warn(`Supabase UPSERT error ${response.status}:`, errText);
+            return { data: null, error: { code: response.status, message: errText } };
           }
-          return await response.json();
+          const result = await response.json();
+          return { data: result, error: null };
         } catch (err) {
-          console.warn(`Supabase API error:`, err.message);
-          return null;
+          console.warn('Supabase UPSERT failed:', err);
+          return { data: null, error: err };
+        }
+      },
+      async select(table, key, value) {
+        if (!SUPABASE_ENABLED) return { data: null, error: new Error('Supabase disabled') };
+        try {
+          const url = `${SUPABASE_URL}/rest/v1/${table}?key=eq.${encodeURIComponent(value)}&select=value`;
+          const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+              'apikey': SUPABASE_ANON_KEY
+            }
+          });
+          if (!response.ok) {
+            return { data: null, error: { code: response.status } };
+          }
+          const result = await response.json();
+          return { data: result && result.length > 0 ? { value: result[0].value } : null, error: null };
+        } catch (err) {
+          console.warn('Supabase SELECT failed:', err);
+          return { data: null, error: err };
         }
       }
     };
     
-    // Create client-like interface for compatibility
+    // Create client interface
     supabaseClient = {
       from: (table) => ({
-        upsert: (data) => supabaseAPI.query(table, 'POST', data),
+        upsert: (data) => supabaseAPI.upsert(table, data),
         select: (cols) => ({
-          eq: (key, val) => ({
-            single: () => supabaseAPI.query(table, 'GET')
+          eq: (field, val) => ({
+            single: () => supabaseAPI.select(table, field, val)
           })
         })
-      }),
-      storage: {
-        from: (bucket) => ({
-          upload: (path, file) => ({ data: { path }, error: null }),
-          getPublicUrl: (path) => ({ data: { publicUrl: `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${path}` } })
-        })
-      }
+      })
     };
     
     console.log('✓ Supabase API initialized');
@@ -12921,7 +12935,6 @@ if (typeof Object.freeze === 'function') {
         profileName: document.getElementById('profile-name').textContent,
         profileRole: document.getElementById('profile-role').textContent,
         projects: projects.map(p => ({ ...p })),
-        // Portfolio: metadata only — images live in IndexedDB
         portfolio: portfolioEntries.map(p => ({
           id: p.id, title: p.title, desc: p.desc, type: p.type, bg: p.bg,
           hasThumb: !!p.thumb, hasAvatar: !!p.avatar,
@@ -12940,24 +12953,55 @@ if (typeof Object.freeze === 'function') {
         currentScreen
       };
       try {
-        localStorage.setItem(LS_DATA, JSON.stringify(state));
+        // Save to Supabase FIRST (cloud is primary)
         if (SUPABASE_ENABLED && supabaseClient) {
-          supabaseUpsertAppState('mj_system_state', state).catch(err => console.warn('Supabase state save failed', err));
+          supabaseUpsertAppState('mj_system_state', state)
+            .then(() => {
+              // Only save to localStorage after cloud save succeeds
+              localStorage.setItem(LS_DATA, JSON.stringify(state));
+              if (showMsg) toast('✓ Saved to Cloud', 'success');
+            })
+            .catch(err => {
+              // Fallback: save to localStorage if cloud fails
+              console.warn('Cloud save failed, falling back to local:', err);
+              localStorage.setItem(LS_DATA, JSON.stringify(state));
+              if (showMsg) toast('⚠ Saved locally (no cloud)', 'warning');
+            });
+        } else {
+          // No Supabase: save locally only
+          localStorage.setItem(LS_DATA, JSON.stringify(state));
+          if (showMsg) toast('System saved.', 'success');
         }
-        if (showMsg) toast('System saved.', 'success');
       } catch (e) { console.warn('localStorage save error:', e); }
     }
 
     // ═══════════════════════════════════════════════════
-    // LOAD — localStorage (text) + IndexedDB (images)
+    // LOAD — Supabase FIRST, then localStorage
     // ═══════════════════════════════════════════════════
     async function loadFromLS() {
       try {
-        let raw = localStorage.getItem(LS_DATA);
-        if (!raw && SUPABASE_ENABLED && supabaseClient) {
-          const remoteState = await supabaseGetAppState('mj_system_state');
-          if (remoteState) raw = JSON.stringify(remoteState);
+        let raw = null;
+        let source = null;
+        
+        // Try Supabase FIRST (cloud is source of truth)
+        if (SUPABASE_ENABLED && supabaseClient) {
+          try {
+            const remoteState = await supabaseGetAppState('mj_system_state');
+            if (remoteState) {
+              raw = JSON.stringify(remoteState);
+              source = 'cloud';
+            }
+          } catch (err) {
+            console.warn('Failed to load from Supabase:', err);
+          }
         }
+        
+        // Fallback to localStorage if no cloud data
+        if (!raw) {
+          raw = localStorage.getItem(LS_DATA);
+          source = 'local';
+        }
+        
         if (!raw) return;
         const d = JSON.parse(raw);
 
