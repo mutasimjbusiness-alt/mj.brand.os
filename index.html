@@ -242,6 +242,8 @@ if (typeof Object.freeze === 'function') {
 }
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase.min.js"></script>
+  <script src="mj-cloud.js"></script>
   <style>
     :root {
       /* ── NEW DESIGN SYSTEM (Homepage V2) ── */
@@ -9135,6 +9137,20 @@ if (typeof Object.freeze === 'function') {
     </div>
   </div>
 
+  <div id="modal-cloud-auth" class="modal-overlay" style="z-index:99999">
+    <div class="modal" style="max-width:400px">
+      <div class="modal-title">Cloud Sign In</div>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">Sign in to sync across devices.</p>
+      <input id="cloud-auth-email" type="email" class="license-input" placeholder="Email" style="margin-bottom:8px;width:100%">
+      <input id="cloud-auth-password" type="password" class="license-input" placeholder="Password" style="margin-bottom:8px;width:100%">
+      <p id="cloud-auth-error" style="color:#e55;font-size:11px;min-height:16px"></p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" type="button" onclick="mjCloudSignUp()">Create account</button>
+        <button class="btn btn-primary" type="button" onclick="mjCloudSignIn()">Sign in</button>
+      </div>
+    </div>
+  </div>
+
   <div id="locked-overlay" class="locked-overlay" aria-hidden="true">
     <div class="locked-box">
       <div class="locked-icon"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -11428,210 +11444,24 @@ if (typeof Object.freeze === 'function') {
     const EMAILJS_TEMPLATE_ID = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.emailjs.templateId : '';
     const EMAILJS_ACTIVATION_TEMPLATE_ID = EMAILJS_TEMPLATE_ID;
 
-    const SUPABASE_URL = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.url : '';
-    const SUPABASE_ANON_KEY = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.anonKey : '';
-    const SUPABASE_BUCKET = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.bucket : 'mj-media';
-    const SUPABASE_APP_STATE_TABLE = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.appStateTable : 'mj_app_state';
-    const SUPABASE_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY && (typeof MJ_CONFIG !== 'undefined' ? MJ_CONFIG.supabase.enabled : false));
-    
-    // Expose to window for debugging and external access
-    window.SUPABASE_URL = SUPABASE_URL;
-    window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
-    window.SUPABASE_BUCKET = SUPABASE_BUCKET;
-    window.SUPABASE_APP_STATE_TABLE = SUPABASE_APP_STATE_TABLE;
-    window.SUPABASE_ENABLED = SUPABASE_ENABLED;
     let supabaseClient = null;
-    
-    // Supabase REST API wrapper - properly formatted
-    window.supabaseAPI = {
-      async upsert(table, data) {
-        if (!SUPABASE_ENABLED) return { data: null, error: new Error('Supabase disabled') };
-        try {
-          // For Supabase REST API UPSERT: use POST with on_conflict=column and resolution=merge
-          const url = `${SUPABASE_URL}/rest/v1/${table}?on_conflict=key&resolution=merge`;
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-              'apikey': SUPABASE_ANON_KEY,
-              'Prefer': 'resolution=merge'  // Alternative: Prefer header
-            },
-            body: JSON.stringify(data)
-          });
-          if (!response.ok) {
-            const errText = await response.text();
-            console.warn(`Supabase UPSERT error ${response.status}:`, errText);
-            return { data: null, error: { code: response.status, message: errText } };
-          }
-          const result = await response.json();
-          console.log('✓ Supabase UPSERT successful:', data.key || 'unnamed');
-          return { data: result, error: null };
-        } catch (err) {
-          console.error('Supabase UPSERT exception:', err.message);
-          return { data: null, error: err };
-        }
-      },
-      async select(table, key, value) {
-        if (!SUPABASE_ENABLED) return { data: null, error: new Error('Supabase disabled') };
-        try {
-          const url = `${SUPABASE_URL}/rest/v1/${table}?key=eq.${encodeURIComponent(value)}&select=value`;
-          const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-              'apikey': SUPABASE_ANON_KEY
-            }
-          });
-          if (!response.ok) {
-            return { data: null, error: { code: response.status } };
-          }
-          const result = await response.json();
-          return { data: result && result.length > 0 ? { value: result[0].value } : null, error: null };
-        } catch (err) {
-          console.warn('Supabase SELECT failed:', err);
-          return { data: null, error: err };
-        }
-      }
-    };
-    
-    // Create client interface
-    window.supabaseClient = {
-      from: (table) => ({
-        upsert: (data) => window.supabaseAPI.upsert(table, data),
-        select: (cols) => ({
-          eq: (field, val) => ({
-            single: () => window.supabaseAPI.select(table, field, val)
-          })
-        })
-      })
-    };
-    supabaseClient = window.supabaseClient;
-    
-    console.log('✓ Supabase API initialized');
+    let SUPABASE_ENABLED = !!(typeof MJ_CONFIG !== 'undefined' && MJ_CONFIG.supabase?.enabled);
 
-    // ═══════════════════════════════════════════════════
-    // INDEXEDDB — Config-driven storage
-    // ═══════════════════════════════════════════════════
-    const DB_NAME = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.storage.dbName : 'mj_v5_idb';
-    const DB_VER = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.storage.dbVersion : 1;
-    const IDB_STORE = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.storage.storeName : 'imgs';
-    let IDB;
+    async function supabaseUpsertAppState(_key, value) {
+      const r = await MJCloud.upsertState(value);
+      return r.ok;
+    }
 
-    function openDB() {
-      return new Promise((res, rej) => {
-        const r = indexedDB.open(DB_NAME, DB_VER);
-        r.onupgradeneeded = e => {
-          const d = e.target.result;
-          if (!d.objectStoreNames.contains(IDB_STORE))
-            d.createObjectStore(IDB_STORE);
-        };
-        r.onsuccess = e => { IDB = e.target.result; res(); };
-        r.onerror = e => { console.error('IDB open failed', e); rej(e); };
-      });
-    }
-    function idbPut(key, val) {
-      if (!IDB) return Promise.resolve();
-      return new Promise((res, rej) => {
-        const tx = IDB.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).put(val, key);
-        tx.oncomplete = res;
-        tx.onerror = e => { console.warn('idbPut error', key, e); rej(e); };
-      });
-    }
-    function idbGet(key) {
-      if (!IDB) return Promise.resolve(null);
-      return new Promise((res) => {
-        const tx = IDB.transaction(IDB_STORE, 'readonly');
-        const r = tx.objectStore(IDB_STORE).get(key);
-        r.onsuccess = e => res(e.target.result || null);
-        r.onerror = () => res(null);
-      });
-    }
-    function idbDel(key) {
-      if (!IDB) return Promise.resolve();
-      return new Promise((res, rej) => {
-        const tx = IDB.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).delete(key);
-        tx.oncomplete = res; tx.onerror = rej;
-      });
-    }
-    function idbClear() {
-      if (!IDB) return Promise.resolve();
-      return new Promise((res, rej) => {
-        const tx = IDB.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).clear();
-        tx.oncomplete = res; tx.onerror = rej;
-      });
+    async function supabaseGetAppState(_key) {
+      return MJCloud.loadState();
     }
 
     async function uploadToSupabaseStorage(file, path) {
-      if (!supabaseClient || !SUPABASE_ENABLED) return null;
+      if (!MJCloud.enabled() || !(await MJCloud.userId())) return null;
       try {
-        const { data, error } = await supabaseClient.storage.from(SUPABASE_BUCKET).upload(path, file, { upsert: true });
-        if (error) {
-          console.warn('Supabase upload error', error);
-          return null;
-        }
-        const { data: pub } = supabaseClient.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
-        return pub?.publicUrl || null;
+        return await MJCloud.upload(file, path);
       } catch (err) {
         console.warn('Supabase upload failed', err);
-        return null;
-      }
-    }
-
-    async function supabaseUpsertAppState(key, value) {
-      if (!supabaseClient || !SUPABASE_ENABLED) {
-        console.log('Supabase disabled or unavailable');
-        return false;
-      }
-      try {
-        const result = await supabaseClient.from(SUPABASE_APP_STATE_TABLE).upsert({ key, value });
-        // API returns {data, error}
-        if (result.error) {
-          console.warn('Supabase UPSERT error:', result.error);
-          return false;
-        }
-        console.log('✓ Data saved to Supabase:', key);
-        return true;
-      } catch (err) {
-        console.error('Supabase UPSERT exception:', err);
-        return false;
-      }
-    }
-
-    async function supabaseGetAppState(key) {
-      if (!supabaseClient || !SUPABASE_ENABLED) {
-        console.log('Supabase disabled, cannot load');
-        return null;
-      }
-      try {
-        // Direct API call with proper query syntax
-        const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_APP_STATE_TABLE}?key=eq.${encodeURIComponent(key)}&select=value`;
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-            'apikey': SUPABASE_ANON_KEY
-          }
-        });
-        
-        if (!response.ok) {
-          console.warn('Supabase GET failed:', response.status);
-          return null;
-        }
-        
-        const result = await response.json();
-        if (!result || result.length === 0) {
-          console.log('No data found for key:', key);
-          return null;
-        }
-        
-        console.log('✓ Data loaded from Supabase:', key);
-        return result[0].value || null;
-      } catch (err) {
-        console.error('Supabase SELECT exception:', err);
         return null;
       }
     }
@@ -12128,9 +11958,9 @@ if (typeof Object.freeze === 'function') {
         wrap.appendChild(slide);
 
         if (b.hasImg) {
-          idbGet(imgKey.hero() + '_' + b.id).then(src => {
-            if (src) document.getElementById(imgId).src = src;
-          });
+          const el = document.getElementById(imgId);
+          if (b.remoteImg) el.src = b.remoteImg;
+          else idbGet(imgKey.hero() + '_' + b.id).then(src => { if (src) el.src = src; });
         }
 
         // Dot
@@ -12293,7 +12123,7 @@ if (typeof Object.freeze === 'function') {
       await idbPut(imgKey.avatar(), src);
       if (SUPABASE_ENABLED && supabaseClient) {
         const remoteUrl = await uploadToSupabaseStorage(f, `avatar/${Date.now()}-${sanitizeFilename(f.name)}`);
-        if (remoteUrl) console.log('Supabase avatar mirror saved:', remoteUrl);
+        if (remoteUrl) window._mjAvatarUrl = remoteUrl;
       }
       saveToLS();
       toast('Photo saved.', 'success');
@@ -12309,6 +12139,7 @@ if (typeof Object.freeze === 'function') {
       await idbPut(imgKey.svc(svcId), src);
       if (SUPABASE_ENABLED && supabaseClient) {
         const remoteUrl = await uploadToSupabaseStorage(f, `service/${svcId}-${Date.now()}-${sanitizeFilename(f.name)}`);
+        if (remoteUrl) { window._mjSvcUrls = window._mjSvcUrls || {}; window._mjSvcUrls[svcId] = remoteUrl; }
         if (remoteUrl) console.log('Supabase service banner mirror saved:', remoteUrl);
       }
       saveToLS();
@@ -12325,6 +12156,7 @@ if (typeof Object.freeze === 'function') {
       await idbPut(imgKey.pageBanner(bannerId), src);
       if (SUPABASE_ENABLED && supabaseClient) {
         const remoteUrl = await uploadToSupabaseStorage(f, `page-banner/${bannerId}-${Date.now()}-${sanitizeFilename(f.name)}`);
+        if (remoteUrl) { window._mjPageUrls = window._mjPageUrls || {}; window._mjPageUrls[bannerId] = remoteUrl; }
         if (remoteUrl) console.log('Supabase page banner mirror saved:', remoteUrl);
       }
       saveToLS();
@@ -12973,13 +12805,19 @@ if (typeof Object.freeze === 'function') {
         portfolio: portfolioEntries.map(p => ({
           id: p.id, title: p.title, desc: p.desc, type: p.type, bg: p.bg,
           hasThumb: !!p.thumb, hasAvatar: !!p.avatar,
+          remoteThumb: p.remoteThumb || null, remoteAvatar: p.remoteAvatar || null,
+          galleryRemoteUrls: p.galleryRemoteUrls || null,
           galleryCount: (p.gallery || []).length
         })),
+        avatarUrl: window._mjAvatarUrl || (document.getElementById('avatar-img')?.src?.startsWith('http') ? document.getElementById('avatar-img').src : null),
+        svcBannerUrls: window._mjSvcUrls || {},
+        pageBannerUrls: window._mjPageUrls || {},
         clients: clientsData.map(c => ({ ...c })),
         blogs: blogsData.map(b => ({
           id: b.id, title: b.title, excerpt: b.excerpt, content: b.content,
           category: b.category, featured: b.featured, date: b.date, readTime: b.readTime,
-          hasThumb: b.hasThumb, hasBanner: b.hasBanner
+          hasThumb: b.hasThumb, hasBanner: b.hasBanner,
+          thumbUrl: b.remoteThumb || null, bannerUrl: b.remoteBanner || null
         })),
         bannersData: bannersData.map(b => ({ ...b })),
         philContent: document.getElementById('phil-content').innerHTML,
@@ -12991,6 +12829,23 @@ if (typeof Object.freeze === 'function') {
         // Save to Supabase FIRST (cloud is primary)
         if (SUPABASE_ENABLED && supabaseClient) {
           try {
+            // Ensure user is authenticated; if not, prompt and fallback to local
+            if (typeof MJCloud !== 'undefined' && !MJCloud.ready) {
+              try {
+                const authed = await MJCloud.ensureAuth();
+                SUPABASE_ENABLED = authed && !!(await MJCloud.userId());
+              } catch (e) {
+                console.warn('Auth attempt failed:', e);
+              }
+            }
+
+            if (!MJCloud || !MJCloud.ready || !(await MJCloud.userId())) {
+              // Not signed in: don't attempt cloud write
+              localStorage.setItem(LS_DATA, JSON.stringify(state));
+              if (showMsg) toast('⚠ Saved locally (sign in to sync)', 'warning');
+              return;
+            }
+
             const saved = await supabaseUpsertAppState('mj_system_state', state);
             localStorage.setItem(LS_DATA, JSON.stringify(state));
             if (showMsg) {
@@ -13020,7 +12875,7 @@ if (typeof Object.freeze === 'function') {
         // Try Supabase FIRST (cloud is source of truth)
         if (SUPABASE_ENABLED && supabaseClient) {
           try {
-            const remoteState = await supabaseGetAppState('mj_system_state');
+            const remoteState = await supabaseGetAppState(null);
             if (remoteState) {
               raw = JSON.stringify(remoteState);
               source = 'cloud';
@@ -13053,8 +12908,8 @@ if (typeof Object.freeze === 'function') {
         if (d.blogs && d.blogs.length > 0) {
           blogsData = [];
           for (const b of d.blogs) {
-            const loadedThumb = b.hasThumb ? await idbGet(imgKey.blogThumb(b.id)) : null;
-            const loadedBanner = b.hasBanner ? await idbGet(imgKey.blogBanner(b.id)) : null;
+            const loadedThumb = b.thumbUrl || (b.hasThumb ? await idbGet(imgKey.blogThumb(b.id)) : null);
+            const loadedBanner = b.bannerUrl || (b.hasBanner ? await idbGet(imgKey.blogBanner(b.id)) : null);
             blogsData.push({ ...b, loadedThumb, loadedBanner });
           }
         } else {
@@ -13071,9 +12926,12 @@ if (typeof Object.freeze === 'function') {
           portfolioEntries = [];
           for (const pm of d.portfolio) {
             const entry = { id: pm.id, title: pm.title, desc: pm.desc, type: pm.type, bg: pm.bg, thumb: null, avatar: null, gallery: [] };
-            if (pm.hasThumb) entry.thumb = await idbGet(imgKey.portThumb(pm.id));
-            if (pm.hasAvatar) entry.avatar = await idbGet(imgKey.portAvatar(pm.id));
-            for (let i = 0; i < (pm.galleryCount || 0); i++) {
+            if (pm.remoteThumb) entry.thumb = pm.remoteThumb;
+            else if (pm.hasThumb) entry.thumb = await idbGet(imgKey.portThumb(pm.id));
+            if (pm.remoteAvatar) entry.avatar = pm.remoteAvatar;
+            else if (pm.hasAvatar) entry.avatar = await idbGet(imgKey.portAvatar(pm.id));
+            if (pm.galleryRemoteUrls?.length) entry.gallery = [...pm.galleryRemoteUrls];
+            else for (let i = 0; i < (pm.galleryCount || 0); i++) {
               const gs = await idbGet(imgKey.gallery(pm.id, i));
               if (gs) entry.gallery.push(gs);
             }
@@ -13089,7 +12947,7 @@ if (typeof Object.freeze === 'function') {
         startHeroAutoplay();
 
         // Avatar from IDB
-        const avatarSrc = await idbGet(imgKey.avatar());
+        const avatarSrc = d.avatarUrl || await idbGet(imgKey.avatar());
         if (avatarSrc) {
           const img = document.getElementById('avatar-img');
           img.src = avatarSrc; img.style.display = 'block';
@@ -13098,13 +12956,13 @@ if (typeof Object.freeze === 'function') {
 
         // Service banners from IDB
         for (const svcId of Object.keys(SERVICES_DATA)) {
-          const src = await idbGet(imgKey.svc(svcId));
+          const src = d.svcBannerUrls?.[svcId] || await idbGet(imgKey.svc(svcId));
           if (src) applyServiceBannerImg(svcId, src);
         }
 
         // Page banners from IDB
         for (const bid of ['phil-banner', 'about-banner', 'contact-banner', 'svc-detail-banner']) {
-          const src = await idbGet(imgKey.pageBanner(bid));
+          const src = d.pageBannerUrls?.[bid] || await idbGet(imgKey.pageBanner(bid));
           if (src) applyPageBannerImg(bid, src);
         }
         
@@ -13179,8 +13037,15 @@ if (typeof Object.freeze === 'function') {
     // INIT
     // ═══════════════════════════════════════════════════
     async function initSystem() {
-      await openDB();          // Open IndexedDB first
-      await loadFromLS();      // Load text + images
+      if (typeof MJCloud !== 'undefined' && MJCloud.enabled()) {
+        await MJCloud.init();
+        supabaseClient = MJCloud.clientAdapter();
+        window.supabaseClient = supabaseClient;
+        const authed = await MJCloud.ensureAuth();
+        SUPABASE_ENABLED = authed && !!(await MJCloud.userId());
+      }
+      await openDB();
+      await loadFromLS();
       renderProjects();
       renderPortfolio();       // Re-render with loaded images
       renderClients();

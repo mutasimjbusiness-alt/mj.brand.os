@@ -62,6 +62,7 @@ if (typeof Object.freeze === 'function') {
   Object.freeze(MJ_CONFIG.emailjs);
   Object.freeze(MJ_CONFIG.ai);
   Object.freeze(MJ_CONFIG.storage);
+  // supabase: { enabled, url, anonKey, bucket, appStateTable }
   Object.freeze(MJ_CONFIG.supabase);
   Object.freeze(MJ_CONFIG.system);
 }
