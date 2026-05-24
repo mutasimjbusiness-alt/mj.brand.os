@@ -11265,15 +11265,51 @@
     const SUPABASE_APP_STATE_TABLE = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.supabase.appStateTable : 'mj_app_state';
     const SUPABASE_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY && (typeof MJ_CONFIG !== 'undefined' ? MJ_CONFIG.supabase.enabled : false));
     let supabaseClient = null;
-    if (SUPABASE_ENABLED) {
-      const lib = window.supabase || window.Supabase;
-      if (lib && typeof lib.createClient === 'function') {
-        supabaseClient = lib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        console.log('Supabase initialized');
-      } else {
-        console.warn('Supabase script not loaded or unsupported version');
+    
+    // Dynamic SDK loader
+    async function loadSupabaseSDK() {
+      if (!SUPABASE_ENABLED) return false;
+      try {
+        // Check if already loaded
+        if (window.supabase?.createClient || window.Supabase?.createClient) {
+          const lib = window.supabase || window.Supabase;
+          supabaseClient = lib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+          console.log('✓ Supabase SDK loaded from window');
+          return true;
+        }
+        
+        // Load SDK dynamically via CDN
+        const sdkUrl = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase-js.min.js';
+        const script = document.createElement('script');
+        script.src = sdkUrl;
+        script.async = true;
+        
+        return new Promise((resolve) => {
+          script.onload = () => {
+            const lib = window.supabase || window.Supabase;
+            if (lib?.createClient) {
+              supabaseClient = lib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+              console.log('✓ Supabase SDK dynamically loaded');
+              resolve(true);
+            } else {
+              console.warn('Supabase SDK loaded but createClient not found');
+              resolve(false);
+            }
+          };
+          script.onerror = () => {
+            console.warn('Failed to load Supabase SDK from CDN');
+            resolve(false);
+          };
+          document.head.appendChild(script);
+        });
+      } catch (err) {
+        console.warn('Error loading Supabase SDK:', err);
+        return false;
       }
     }
+    
+    // Load SDK immediately in background
+    loadSupabaseSDK().catch(err => console.warn('SDK load error:', err));
 
     // ═══════════════════════════════════════════════════
     // INDEXEDDB — Config-driven storage
