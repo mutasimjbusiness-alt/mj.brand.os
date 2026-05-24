@@ -11457,17 +11457,79 @@ if (typeof Object.freeze === 'function') {
     }
 
     async function uploadToSupabaseStorage(file, path) {
-      if (!MJCloud.enabled() || !(await MJCloud.userId())) return null;
+      if (!MJCloud.enabled()) {
+        toast('Cloud sync is disabled in config', 'warning');
+        return null;
+      }
       try {
-        return await MJCloud.upload(file, path);
+        const url = await MJCloud.upload(file, path);
+        if (!url) {
+          const msg = window._mjLastUploadError || 'Upload failed — sign in and try again';
+          toast(msg, 'error');
+          return null;
+        }
+        return url;
       } catch (err) {
         console.warn('Supabase upload failed', err);
+        toast(err.message || 'Upload failed', 'error');
         return null;
       }
     }
 
     function sanitizeFilename(name) {
       return String(name).replace(/[^a-zA-Z0-9-_.]/g, '_');
+    }
+
+    const DB_NAME = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.storage.dbName : 'mj_v5_idb';
+    const DB_VER = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.storage.dbVersion : 1;
+    const IDB_STORE = (typeof MJ_CONFIG !== 'undefined') ? MJ_CONFIG.storage.storeName : 'imgs';
+    let IDB;
+
+    function openDB() {
+      return new Promise((res, rej) => {
+        const r = indexedDB.open(DB_NAME, DB_VER);
+        r.onupgradeneeded = e => {
+          const d = e.target.result;
+          if (!d.objectStoreNames.contains(IDB_STORE))
+            d.createObjectStore(IDB_STORE);
+        };
+        r.onsuccess = e => { IDB = e.target.result; res(); };
+        r.onerror = e => { console.error('IDB open failed', e); rej(e); };
+      });
+    }
+    function idbPut(key, val) {
+      if (!IDB) return Promise.resolve();
+      return new Promise((res, rej) => {
+        const tx = IDB.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(val, key);
+        tx.oncomplete = res;
+        tx.onerror = e => { console.warn('idbPut error', key, e); rej(e); };
+      });
+    }
+    function idbGet(key) {
+      if (!IDB) return Promise.resolve(null);
+      return new Promise((res) => {
+        const tx = IDB.transaction(IDB_STORE, 'readonly');
+        const r = tx.objectStore(IDB_STORE).get(key);
+        r.onsuccess = e => res(e.target.result || null);
+        r.onerror = () => res(null);
+      });
+    }
+    function idbDel(key) {
+      if (!IDB) return Promise.resolve();
+      return new Promise((res, rej) => {
+        const tx = IDB.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).delete(key);
+        tx.oncomplete = res; tx.onerror = rej;
+      });
+    }
+    function idbClear() {
+      if (!IDB) return Promise.resolve();
+      return new Promise((res, rej) => {
+        const tx = IDB.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).clear();
+        tx.oncomplete = res; tx.onerror = rej;
+      });
     }
     // Image key naming convention
     const imgKey = {
@@ -12124,6 +12186,7 @@ if (typeof Object.freeze === 'function') {
       if (SUPABASE_ENABLED && supabaseClient) {
         const remoteUrl = await uploadToSupabaseStorage(f, `avatar/${Date.now()}-${sanitizeFilename(f.name)}`);
         if (remoteUrl) window._mjAvatarUrl = remoteUrl;
+        else if (SUPABASE_ENABLED) return;
       }
       saveToLS();
       toast('Photo saved.', 'success');
@@ -12842,12 +12905,14 @@ if (typeof Object.freeze === 'function') {
             if (!MJCloud || !MJCloud.ready || !(await MJCloud.userId())) {
               // Not signed in: don't attempt cloud write
               localStorage.setItem(LS_DATA, JSON.stringify(state));
+              console.log('saveToLS: saved locally only because auth is not ready', { ready: MJCloud?.ready, userId: await MJCloud?.userId?.() });
               if (showMsg) toast('⚠ Saved locally (sign in to sync)', 'warning');
               return;
             }
 
             const saved = await supabaseUpsertAppState('mj_system_state', state);
             localStorage.setItem(LS_DATA, JSON.stringify(state));
+            console.log('saveToLS: cloud save result', { saved, authReady: MJCloud.ready, userId: await MJCloud.userId() });
             if (showMsg) {
               toast(saved ? '✓ Saved to Cloud' : '⚠ Saved locally only', saved ? 'success' : 'warning');
             }
@@ -13041,8 +13106,8 @@ if (typeof Object.freeze === 'function') {
         await MJCloud.init();
         supabaseClient = MJCloud.clientAdapter();
         window.supabaseClient = supabaseClient;
-        const authed = await MJCloud.ensureAuth();
-        SUPABASE_ENABLED = authed && !!(await MJCloud.userId());
+        SUPABASE_ENABLED = true;
+        if (await MJCloud.isSignedIn()) MJCloud.ready = true;
       }
       await openDB();
       await loadFromLS();

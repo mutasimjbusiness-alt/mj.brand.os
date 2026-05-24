@@ -59,9 +59,14 @@
       if (!this._client) throw new Error('Supabase client not initialized');
       const { data, error } = await this._client.auth.signUp({ email, password });
       if (error) throw error;
-      // if signed in automatically, set ready
-      this.ready = !!data?.session?.access_token;
-      return data;
+      if (data?.session?.access_token) {
+        this.ready = true;
+        return data;
+      }
+      const { data: signInData, error: signInErr } = await this._client.auth.signInWithPassword({ email, password });
+      if (signInErr) throw new Error(signInErr.message + ' (confirm email in Supabase Auth settings if needed)');
+      this.ready = !!signInData?.session?.access_token;
+      return signInData;
     },
 
     async signOut() {
@@ -70,8 +75,28 @@
       this.ready = false;
     },
 
+    async isSignedIn() {
+      if (!this._client) return false;
+      const { data } = await this._client.auth.getSession();
+      return !!data?.session?.access_token;
+    },
+
+    async ensureSignedIn(showModal = true) {
+      if (!this.enabled() || !this._client) return null;
+      await this.init();
+      if (await this.isSignedIn()) {
+        this.ready = true;
+        return (await this._client.auth.getUser()).data?.user?.id || null;
+      }
+      if (!showModal) return null;
+      const ok = await this.ensureAuth();
+      if (!ok) return null;
+      return (await this._client.auth.getUser()).data?.user?.id || null;
+    },
+
     async ensureAuth() {
       if (!this.enabled()) return false;
+      if (!this._client) await this.init();
       // if already signed in, resolve true
       try {
         const s = await this._client.auth.getSession();
@@ -124,13 +149,20 @@
     },
 
     async upload(file, path) {
-      if (!this._client) return null;
-      const uid = (await this._client.auth.getUser()).data?.user?.id;
+      if (!this._client) await this.init();
+      const uid = await this.ensureSignedIn(true);
       if (!uid || !file) return null;
       const c = this.cfg();
       const storagePath = uid + '/' + path;
-      const { error } = await this._client.storage.from(c.bucket).upload(storagePath, file, { upsert: true });
-      if (error) { console.warn('Storage upload failed', error); return null; }
+      const { error } = await this._client.storage.from(c.bucket).upload(storagePath, file, {
+        upsert: true,
+        contentType: file.type || 'application/octet-stream'
+      });
+      if (error) {
+        console.warn('Storage upload failed', error.message || error);
+        global._mjLastUploadError = error.message || String(error);
+        return null;
+      }
       const { data } = this._client.storage.from(c.bucket).getPublicUrl(storagePath);
       return data?.publicUrl || (c.url + '/storage/v1/object/public/' + c.bucket + '/' + storagePath);
     },
