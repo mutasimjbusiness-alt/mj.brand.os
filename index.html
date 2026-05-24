@@ -9388,7 +9388,7 @@ if (typeof Object.freeze === 'function') {
             d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
         </svg>Toggle Light Mode</button>
       <div style="display:flex;gap:5px"><button class="sidebar-identity-btn" style="flex:1;text-align:center"
-          onclick="saveToLS(true)">💾 Save Now</button><button class="sidebar-identity-btn"
+          onclick="saveToLS(true).catch(e => console.warn('Save failed:', e))">💾 Save Now</button><button class="sidebar-identity-btn"
           style="color:#e05555;border-color:rgba(224,85,85,.25);padding:6px 10px"
           onclick="if(confirm(currentLang==='ar'?'مسح كل البيانات وإعادة الضبط؟':'Clear all data and reset?'))clearLS()">🗑</button>
       </div>
@@ -11571,32 +11571,56 @@ if (typeof Object.freeze === 'function') {
     }
 
     async function supabaseUpsertAppState(key, value) {
-      if (!supabaseClient || !SUPABASE_ENABLED) return false;
+      if (!supabaseClient || !SUPABASE_ENABLED) {
+        console.log('Supabase disabled or unavailable');
+        return false;
+      }
       try {
-        const { error } = await supabaseClient.from(SUPABASE_APP_STATE_TABLE).upsert({ key, value });
-        if (error) {
-          console.warn('Supabase app-state save error', error);
+        const result = await supabaseClient.from(SUPABASE_APP_STATE_TABLE).upsert({ key, value });
+        // API returns {data, error}
+        if (result.error) {
+          console.warn('Supabase UPSERT error:', result.error);
           return false;
         }
+        console.log('✓ Data saved to Supabase:', key);
         return true;
       } catch (err) {
-        console.warn('Supabase app-state save failed', err);
+        console.error('Supabase UPSERT exception:', err);
         return false;
       }
     }
 
     async function supabaseGetAppState(key) {
-      if (!supabaseClient || !SUPABASE_ENABLED) return null;
+      if (!supabaseClient || !SUPABASE_ENABLED) {
+        console.log('Supabase disabled, cannot load');
+        return null;
+      }
       try {
-        const { data, error } = await supabaseClient.from(SUPABASE_APP_STATE_TABLE).select('value').eq('key', key).single();
-        if (error) {
-          if (error?.details && error.details.includes('No rows returned')) return null;
-          console.warn('Supabase app-state load error', error);
+        // Direct API call with proper query syntax
+        const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_APP_STATE_TABLE}?key=eq.${encodeURIComponent(key)}&select=value`;
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY
+          }
+        });
+        
+        if (!response.ok) {
+          console.warn('Supabase GET failed:', response.status);
           return null;
         }
-        return data?.value || null;
+        
+        const result = await response.json();
+        if (!result || result.length === 0) {
+          console.log('No data found for key:', key);
+          return null;
+        }
+        
+        console.log('✓ Data loaded from Supabase:', key);
+        return result[0].value || null;
       } catch (err) {
-        console.warn('Supabase app-state load failed', err);
+        console.error('Supabase SELECT exception:', err);
         return null;
       }
     }
@@ -12927,7 +12951,7 @@ if (typeof Object.freeze === 'function') {
     // ═══════════════════════════════════════════════════
     // SAVE — localStorage (text only, no images)
     // ═══════════════════════════════════════════════════
-    function saveToLS(showMsg) {
+    async function saveToLS(showMsg) {
       const state = {
         theme: document.documentElement.getAttribute('data-theme'),
         sysName: document.getElementById('sys-name').textContent,
@@ -12955,18 +12979,17 @@ if (typeof Object.freeze === 'function') {
       try {
         // Save to Supabase FIRST (cloud is primary)
         if (SUPABASE_ENABLED && supabaseClient) {
-          supabaseUpsertAppState('mj_system_state', state)
-            .then(() => {
-              // Only save to localStorage after cloud save succeeds
-              localStorage.setItem(LS_DATA, JSON.stringify(state));
-              if (showMsg) toast('✓ Saved to Cloud', 'success');
-            })
-            .catch(err => {
-              // Fallback: save to localStorage if cloud fails
-              console.warn('Cloud save failed, falling back to local:', err);
-              localStorage.setItem(LS_DATA, JSON.stringify(state));
-              if (showMsg) toast('⚠ Saved locally (no cloud)', 'warning');
-            });
+          try {
+            const saved = await supabaseUpsertAppState('mj_system_state', state);
+            localStorage.setItem(LS_DATA, JSON.stringify(state));
+            if (showMsg) {
+              toast(saved ? '✓ Saved to Cloud' : '⚠ Saved locally only', saved ? 'success' : 'warning');
+            }
+          } catch (cloudErr) {
+            console.error('Cloud save failed, using local:', cloudErr);
+            localStorage.setItem(LS_DATA, JSON.stringify(state));
+            if (showMsg) toast('⚠ Saved locally (no cloud)', 'warning');
+          }
         } else {
           // No Supabase: save locally only
           localStorage.setItem(LS_DATA, JSON.stringify(state));
