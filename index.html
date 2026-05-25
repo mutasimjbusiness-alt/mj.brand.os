@@ -9140,7 +9140,7 @@ if (typeof Object.freeze === 'function') {
   <div id="modal-cloud-auth" class="modal-overlay" style="z-index:99999">
     <div class="modal" style="max-width:400px">
       <div class="modal-title">Cloud Sign In</div>
-      <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">Sign in to sync across devices.</p>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">Sign in once per browser to load your global data from the cloud. Same email on all devices.</p>
       <input id="cloud-auth-email" type="email" class="license-input" placeholder="Email" style="margin-bottom:8px;width:100%">
       <input id="cloud-auth-password" type="password" class="license-input" placeholder="Password" style="margin-bottom:8px;width:100%">
       <p id="cloud-auth-error" style="color:#e55;font-size:11px;min-height:16px"></p>
@@ -9405,6 +9405,7 @@ if (typeof Object.freeze === 'function') {
         </svg>Toggle Light Mode</button>
       <div style="display:flex;gap:5px"><button class="sidebar-identity-btn" style="flex:1;text-align:center"
           onclick="saveToLS(true).catch(e => console.warn('Save failed:', e))">💾 Save Now</button><button class="sidebar-identity-btn"
+          onclick="syncFromCloud(true)" title="Reload from cloud">☁ Sync</button><button class="sidebar-identity-btn"
           style="color:#e05555;border-color:rgba(224,85,85,.25);padding:6px 10px"
           onclick="if(confirm(currentLang==='ar'?'مسح كل البيانات وإعادة الضبط؟':'Clear all data and reset?'))clearLS()">🗑</button>
       </div>
@@ -12892,24 +12893,12 @@ if (typeof Object.freeze === 'function') {
         // Save to Supabase FIRST (cloud is primary)
         if (SUPABASE_ENABLED && supabaseClient) {
           try {
-            // Ensure user is authenticated; if not, prompt and fallback to local
-            if (typeof MJCloud !== 'undefined' && !MJCloud.ready) {
-              try {
-                const authed = await MJCloud.ensureAuth();
-                SUPABASE_ENABLED = authed && !!(await MJCloud.userId());
-              } catch (e) {
-                console.warn('Auth attempt failed:', e);
-              }
-            }
-
-            if (!MJCloud || !MJCloud.ready || !(await MJCloud.userId())) {
-              // Not signed in: don't attempt cloud write
+            const signedIn = typeof MJCloud !== 'undefined' && (await MJCloud.isSignedIn());
+            if (!signedIn) {
               localStorage.setItem(LS_DATA, JSON.stringify(state));
-              console.log('saveToLS: saved locally only because auth is not ready', { ready: MJCloud?.ready, userId: await MJCloud?.userId?.() });
-              if (showMsg) toast('⚠ Saved locally (sign in to sync)', 'warning');
+              if (showMsg) toast('⚠ Sign in to sync globally', 'warning');
               return;
             }
-
             const saved = await supabaseUpsertAppState('mj_system_state', state);
             localStorage.setItem(LS_DATA, JSON.stringify(state));
             console.log('saveToLS: cloud save result', { saved, authReady: MJCloud.ready, userId: await MJCloud.userId() });
@@ -12937,8 +12926,8 @@ if (typeof Object.freeze === 'function') {
         let raw = null;
         let source = null;
         
-        // Try Supabase FIRST (cloud is source of truth)
-        if (SUPABASE_ENABLED && supabaseClient) {
+        const signedIn = typeof MJCloud !== 'undefined' && MJCloud.enabled() && (await MJCloud.isSignedIn());
+        if (signedIn) {
           try {
             const remoteState = await supabaseGetAppState(null);
             if (remoteState) {
@@ -12949,8 +12938,6 @@ if (typeof Object.freeze === 'function') {
             console.warn('Failed to load from Supabase:', err);
           }
         }
-        
-        // Fallback to localStorage if no cloud data
         if (!raw) {
           raw = localStorage.getItem(LS_DATA);
           source = 'local';
@@ -13101,25 +13088,42 @@ if (typeof Object.freeze === 'function') {
     // ═══════════════════════════════════════════════════
     // INIT
     // ═══════════════════════════════════════════════════
+    async function syncFromCloud(showToast) {
+      if (typeof MJCloud === 'undefined' || !MJCloud.enabled()) return false;
+      if (!(await MJCloud.isSignedIn())) return false;
+      await loadFromLS();
+      renderProjects();
+      renderPortfolio();
+      renderClients();
+      renderBlogs();
+      if (showToast) toast('✓ Synced from cloud', 'success');
+      return true;
+    }
+    window.syncFromCloud = syncFromCloud;
+
     async function initSystem() {
+      await openDB();
       if (typeof MJCloud !== 'undefined' && MJCloud.enabled()) {
         await MJCloud.init();
         supabaseClient = MJCloud.clientAdapter();
         window.supabaseClient = supabaseClient;
         SUPABASE_ENABLED = true;
-        if (await MJCloud.isSignedIn()) MJCloud.ready = true;
+        if (!(await MJCloud.isSignedIn())) await MJCloud.ensureAuth();
+        MJCloud.ready = await MJCloud.isSignedIn();
       }
-      await openDB();
       await loadFromLS();
       renderProjects();
-      renderPortfolio();       // Re-render with loaded images
+      renderPortfolio();
       renderClients();
       renderBlogs();
       _showScreen('home');
       showOnboarding();
-      // Apply translations after everything is rendered
       setTimeout(() => { applyTranslations(); }, 200);
     }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && MJCloud?.ready) syncFromCloud(false);
+    });
 
     // ═══════════════════════════════════════════════════
     // i18n / LOCALIZATION ENGINE

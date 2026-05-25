@@ -37,6 +37,9 @@
       if (this._client.auth && this._client.auth.onAuthStateChange) {
         this._client.auth.onAuthStateChange((event, session) => {
           this.ready = !!session?.access_token;
+          if (session?.access_token && typeof global.syncFromCloud === 'function') {
+            global.syncFromCloud(false);
+          }
         });
       }
       // try to load current session
@@ -218,6 +221,7 @@
       await MJCloud.signIn(email, pwd);
       if (err) err.textContent = '';
       MJCloud.resolveAuth(true);
+      if (typeof global.syncFromCloud === 'function') await global.syncFromCloud(true);
     } catch (e) {
       if (err) err.textContent = e.message || 'Sign in failed';
     }
@@ -232,6 +236,7 @@
       await MJCloud.signUp(email, pwd);
       if (err) err.textContent = '';
       MJCloud.resolveAuth(true);
+      if (typeof global.syncFromCloud === 'function') await global.syncFromCloud(true);
     } catch (e) {
       if (err) err.textContent = e.message || 'Sign up failed';
     }
