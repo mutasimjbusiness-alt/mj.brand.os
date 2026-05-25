@@ -62,7 +62,15 @@ if (typeof Object.freeze === 'function') {
   Object.freeze(MJ_CONFIG.emailjs);
   Object.freeze(MJ_CONFIG.ai);
   Object.freeze(MJ_CONFIG.storage);
-  // supabase: { enabled, url, anonKey, bucket, appStateTable }
+  supabase: {
+    enabled:       false,
+    url:           '',
+    anonKey:       '',
+    bucket:        'mj-media',
+    appStateTable: 'mj_app_state',
+    stateKey:      'mj_system_state',
+    ownerEmail:    'your@email.com',
+  },
   Object.freeze(MJ_CONFIG.supabase);
   Object.freeze(MJ_CONFIG.system);
 }

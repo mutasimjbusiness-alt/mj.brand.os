@@ -205,12 +205,15 @@ const MJ_CONFIG = {
     dbVersion: 1,
     storeName: 'imgs',
   },
+  // Personal cloud (single owner — same data on all devices after login)
   supabase: {
-    enabled:      true,
-    url:          'https://iqzzuyprmqsopzkegmoh.supabase.co',
-    anonKey:      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxenp1eXBybXFzb3B6a2VnbW9oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1Njg0MzMsImV4cCI6MjA5MjE0NDQzM30.vBmziYb6v8DBjzkS1sF0jnDT9D-rh-G1PcF9neRe8Xk',
-    bucket:       'mj-media',
-    appStateTable:'mj_app_state',
+    enabled:       true,
+    url:           'https://iqzzuyprmqsopzkegmoh.supabase.co',
+    anonKey:       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxenp1eXBybXFzb3B6a2VnbW9oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1Njg0MzMsImV4cCI6MjA5MjE0NDQzM30.vBmziYb6v8DBjzkS1sF0jnDT9D-rh-G1PcF9neRe8Xk',
+    bucket:        'mj-media',
+    appStateTable: 'mj_app_state',
+    stateKey:      'mj_system_state',
+    ownerEmail:    'gmoatasem205@gmail.com',
   },
   // ─── SYSTEM ────────────────────────────────────────────────
   system: {

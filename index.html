@@ -216,11 +216,13 @@ const MJ_CONFIG = {
     storeName: 'imgs',
   },
   supabase: {
-    enabled:      true,
-    url:          'https://iqzzuyprmqsopzkegmoh.supabase.co',
-    anonKey:      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxenp1eXBybXFzb3B6a2VnbW9oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1Njg0MzMsImV4cCI6MjA5MjE0NDQzM30.vBmziYb6v8DBjzkS1sF0jnDT9D-rh-G1PcF9neRe8Xk',
-    bucket:       'mj-media',
-    appStateTable:'mj_app_state',
+    enabled:       true,
+    url:           'https://iqzzuyprmqsopzkegmoh.supabase.co',
+    anonKey:       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxenp1eXBybXFzb3B6a2VnbW9oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1Njg0MzMsImV4cCI6MjA5MjE0NDQzM30.vBmziYb6v8DBjzkS1sF0jnDT9D-rh-G1PcF9neRe8Xk',
+    bucket:        'mj-media',
+    appStateTable: 'mj_app_state',
+    stateKey:      'mj_system_state',
+    ownerEmail:    'gmoatasem205@gmail.com',
   },
   system: {
     version:      '2.0.0',
@@ -9139,14 +9141,13 @@ if (typeof Object.freeze === 'function') {
 
   <div id="modal-cloud-auth" class="modal-overlay" style="z-index:99999" data-no-dismiss="1">
     <div class="modal" style="max-width:400px">
-      <div class="modal-title">Cloud Sign In</div>
-      <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">Sign in once per browser to load your global data from the cloud. Same email on all devices.</p>
-      <input id="cloud-auth-email" type="email" class="license-input" placeholder="Email" style="margin-bottom:8px;width:100%">
-      <input id="cloud-auth-password" type="password" class="license-input" placeholder="Password" style="margin-bottom:8px;width:100%">
+      <div class="modal-title">تسجيل دخول النظام الشخصي</div>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">حساب واحد فقط — نفس البيانات على كل الأجهزة والمتصفحات وIncognito بعد تسجيل الدخول.</p>
+      <input id="cloud-auth-email" type="email" class="license-input" placeholder="البريد الشخصي" style="margin-bottom:8px;width:100%" readonly>
+      <input id="cloud-auth-password" type="password" class="license-input" placeholder="كلمة المرور" style="margin-bottom:8px;width:100%">
       <p id="cloud-auth-error" style="color:#e55;font-size:11px;min-height:16px"></p>
       <div class="modal-actions">
-        <button class="btn btn-ghost" type="button" onclick="mjCloudSignUp()">Create account</button>
-        <button class="btn btn-primary" type="button" onclick="mjCloudSignIn()">Sign in</button>
+        <button class="btn btn-primary" type="button" onclick="mjCloudSignIn()">دخول</button>
       </div>
     </div>
   </div>
@@ -12931,11 +12932,12 @@ if (typeof Object.freeze === 'function') {
             const loadedBanner = b.bannerUrl || (b.hasBanner ? await idbGet(imgKey.blogBanner(b.id)) : null);
             blogsData.push({ ...b, loadedThumb, loadedBanner });
           }
-        } else {
-          // Dummy content engine data
+        } else if (!fromCloud) {
           blogsData = [
             { id: Date.now() - 1000, title: 'The Default Post (Strategy)', excerpt: 'This is an example post to show the content engine structure.', content: '<h2>A starting point</h2><p>This is where your thoughts live.</p><div class="article-insight"><div class="article-insight-lbl">Key Insight</div><div class="article-insight-text">Write your core insight here. This will stand out visually.</div></div>', category: 'Strategy', featured: true, date: Date.now(), readTime: '2 min read', hasThumb: false, hasBanner: false }
           ];
+        } else {
+          blogsData = [];
         }
         if (d.contactEmail && document.getElementById('contact-email')) document.getElementById('contact-email').textContent = d.contactEmail;
         if (d.contactWa && document.getElementById('contact-wa')) document.getElementById('contact-wa').textContent = d.contactWa;
@@ -12985,17 +12987,29 @@ if (typeof Object.freeze === 'function') {
           if (src) applyPageBannerImg(bid, src);
         }
         
-        // After successful load from cloud, save to localStorage as cache
-        if (source === 'cloud') {
-          localStorage.setItem(LS_DATA, raw);
-          console.log('✓ Data cached to localStorage after cloud load');
-        }
+    }
 
+    async function loadFromLS() {
+      try {
+        if (typeof MJCloud !== 'undefined' && MJCloud.enabled()) {
+          if (!(await MJCloud.isSignedIn())) return;
+          const r = await MJCloud.loadState();
+          if (!r.ok) { console.warn('[MJCloud] load:', r.error); return; }
+          if (!r.value) return;
+          await applyAppState(r.value, true);
+          return;
+        }
+        const raw = localStorage.getItem(LS_DATA);
+        if (!raw) return;
+        await applyAppState(JSON.parse(raw), false);
       } catch (e) { console.warn('Load error:', e); }
     }
 
     async function clearLS() {
       if (!confirm(currentLang === 'ar' ? 'مسح كل البيانات وإعادة الضبط؟' : 'Clear all data and reset the system?')) return;
+      if (typeof MJCloud !== 'undefined' && MJCloud.enabled() && (await MJCloud.isSignedIn())) {
+        await MJCloud.deleteState();
+      }
       localStorage.removeItem(LS_DATA);
       localStorage.removeItem('mj_v5_onboarded');
       await idbClear();
@@ -13075,8 +13089,11 @@ if (typeof Object.freeze === 'function') {
         supabaseClient = MJCloud.clientAdapter();
         window.supabaseClient = supabaseClient;
         SUPABASE_ENABLED = true;
-        if (!(await MJCloud.isSignedIn())) await MJCloud.ensureAuth();
-        MJCloud.ready = await MJCloud.isSignedIn();
+        const authed = await MJCloud.requireAuth();
+        if (!authed) {
+          toast('سجّل الدخول لتحميل بياناتك من السحابة', 'warning');
+          return;
+        }
       }
       await loadFromLS();
       renderProjects();
