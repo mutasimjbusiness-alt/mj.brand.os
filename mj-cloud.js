@@ -1,9 +1,10 @@
-/* MJ Brand OS — Supabase cloud sync (Auth + DB + Storage) */
+/* MJ Brand OS — Cloud layer (Supabase = single source of truth) */
 (function (global) {
   const STATE_KEY = 'mj_system_state';
 
   const MJCloud = {
     _client: null,
+    _channel: null,
     ready: false,
 
     cfg() {
@@ -13,69 +14,38 @@
 
     enabled() { return !!this.cfg(); },
 
-    async userId() {
-      if (!this._client) return null;
-      try {
-        const { data } = await this._client.auth.getUser();
-        return data?.user?.id || null;
-      } catch (_) {
-        return null;
-      }
-    },
-
     async init() {
       if (!this.enabled()) return false;
-      const c = this.cfg();
-      if (!global.supabase || !global.supabase.createClient) {
-        console.warn('Supabase JS not found. Include @supabase/supabase-js before mj-cloud.js');
+      if (!global.supabase?.createClient) {
+        console.error('[MJCloud] Missing @supabase/supabase-js');
         return false;
       }
-      this._client = global.supabase.createClient(c.url, c.anonKey, { auth: { persistSession: true } });
+      const c = this.cfg();
+      this._client = global.supabase.createClient(c.url, c.anonKey, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          storage: global.localStorage
+        }
+      });
       global.supabaseClient = this.clientAdapter();
       global.SUPABASE_ENABLED = true;
-      // keep ready state in sync with auth changes
-      if (this._client.auth && this._client.auth.onAuthStateChange) {
-        this._client.auth.onAuthStateChange((event, session) => {
-          this.ready = !!session?.access_token;
-          if (session?.access_token && typeof global.syncFromCloud === 'function') {
-            global.syncFromCloud(false);
-          }
-        });
-      }
-      // try to load current session
-      try {
-        const s = await this._client.auth.getSession();
-        this.ready = !!s?.data?.session?.access_token;
-      } catch (_) {}
-      return true;
-    },
 
-    async signIn(email, password) {
-      if (!this._client) throw new Error('Supabase client not initialized');
-      const { data, error } = await this._client.auth.signInWithPassword({ email, password });
-      if (error) throw error;
+      const { data } = await this._client.auth.getSession();
       this.ready = !!data?.session?.access_token;
-      return data;
-    },
 
-    async signUp(email, password) {
-      if (!this._client) throw new Error('Supabase client not initialized');
-      const { data, error } = await this._client.auth.signUp({ email, password });
-      if (error) throw error;
-      if (data?.session?.access_token) {
-        this.ready = true;
-        return data;
-      }
-      const { data: signInData, error: signInErr } = await this._client.auth.signInWithPassword({ email, password });
-      if (signInErr) throw new Error(signInErr.message + ' (confirm email in Supabase Auth settings if needed)');
-      this.ready = !!signInData?.session?.access_token;
-      return signInData;
-    },
+      this._client.auth.onAuthStateChange((event, session) => {
+        this.ready = !!session?.access_token;
+        if (event === 'SIGNED_IN' && session) {
+          this._subscribeRealtime();
+          if (typeof global.syncFromCloud === 'function') global.syncFromCloud(false);
+        }
+        if (event === 'SIGNED_OUT') this._unsubscribeRealtime();
+      });
 
-    async signOut() {
-      if (!this._client) return;
-      await this._client.auth.signOut();
-      this.ready = false;
+      if (this.ready) await this._subscribeRealtime();
+      return true;
     },
 
     async isSignedIn() {
@@ -84,43 +54,27 @@
       return !!data?.session?.access_token;
     },
 
-    async ensureSignedIn(showModal = true) {
-      if (!this.enabled() || !this._client) return null;
-      await this.init();
-      if (await this.isSignedIn()) {
-        this.ready = true;
-        return (await this._client.auth.getUser()).data?.user?.id || null;
-      }
-      if (!showModal) return null;
-      const ok = await this.ensureAuth();
-      if (!ok) return null;
-      return (await this._client.auth.getUser()).data?.user?.id || null;
-    },
-
-    async ensureAuth() {
+    async requireAuth() {
       if (!this.enabled()) return false;
       if (!this._client) await this.init();
-      // if already signed in, resolve true
-      try {
-        const s = await this._client.auth.getSession();
-        if (s?.data?.session?.access_token) { this.ready = true; return true; }
-      } catch (_) {}
+      if (await this.isSignedIn()) return true;
 
       return new Promise((resolve) => {
         const el = document.getElementById('modal-cloud-auth');
         if (!el) { resolve(false); return; }
-        const savedEmail = global.localStorage?.getItem('mj_cloud_email');
         const emailInp = document.getElementById('cloud-auth-email');
-        if (savedEmail && emailInp && !emailInp.value) emailInp.value = savedEmail;
+        try {
+          const saved = global.localStorage?.getItem('mj_cloud_email');
+          if (saved && emailInp && !emailInp.value) emailInp.value = saved;
+        } catch (_) {}
         el.classList.add('show');
         el._authResolve = resolve;
-        // listen once for auth state change
-        const remove = this._client.auth.onAuthStateChange((event, session) => {
+        const { data: sub } = this._client.auth.onAuthStateChange((_e, session) => {
           if (session?.access_token) {
             el.classList.remove('show');
             this.ready = true;
             if (el._authResolve) { el._authResolve(true); el._authResolve = null; }
-            remove?.data?.subscription?.unsubscribe?.();
+            sub?.subscription?.unsubscribe?.();
           }
         });
       });
@@ -133,44 +87,114 @@
       if (el?._authResolve) { el._authResolve(!!ok); el._authResolve = null; }
     },
 
-    async upsertState(value) {
-      if (!this._client) return { ok: false, error: 'No client' };
-      const uid = (await this._client.auth.getUser()).data?.user?.id;
-      if (!uid) return { ok: false, error: 'Not signed in' };
+    async signIn(email, password) {
+      const { data, error } = await this._client.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      this.ready = true;
+      try { global.localStorage?.setItem('mj_cloud_email', email); } catch (_) {}
+      await this._subscribeRealtime();
+      return data;
+    },
+
+    async signUp(email, password) {
+      const { data, error } = await this._client.auth.signUp({ email, password });
+      if (error) throw error;
+      if (!data.session) {
+        const { error: e2 } = await this._client.auth.signInWithPassword({ email, password });
+        if (e2) throw e2;
+      }
+      this.ready = true;
+      try { global.localStorage?.setItem('mj_cloud_email', email); } catch (_) {}
+      await this._subscribeRealtime();
+      return data;
+    },
+
+    async signOut() {
+      await this._client?.auth.signOut();
+      this.ready = false;
+      this._unsubscribeRealtime();
+    },
+
+    async saveState(value) {
+      if (!this._client) return { ok: false, error: 'no_client' };
+      const { data: { user } } = await this._client.auth.getUser();
+      if (!user) return { ok: false, error: 'not_signed_in' };
       const c = this.cfg();
-      const row = { user_id: uid, key: STATE_KEY, value, updated_at: new Date().toISOString() };
-      const { data, error } = await this._client.from(c.appStateTable).upsert(row, { onConflict: ['user_id', 'key'] });
-      if (error) return { ok: false, error: error.message || error.toString() };
-      return { ok: true, data };
+      const row = {
+        user_id: user.id,
+        key: STATE_KEY,
+        value,
+        updated_at: new Date().toISOString()
+      };
+      const { error } = await this._client
+        .from(c.appStateTable)
+        .upsert(row, { onConflict: 'user_id,key' });
+      if (error) return { ok: false, error: error.message };
+      return { ok: true };
     },
 
     async loadState() {
-      if (!this._client) return null;
-      const uid = (await this._client.auth.getUser()).data?.user?.id;
-      if (!uid) return null;
+      if (!this._client) return { ok: false, error: 'no_client', value: null };
+      const { data: { user } } = await this._client.auth.getUser();
+      if (!user) return { ok: false, error: 'not_signed_in', value: null };
       const c = this.cfg();
-      const { data, error } = await this._client.from(c.appStateTable).select('value').eq('user_id', uid).eq('key', STATE_KEY).maybeSingle();
-      if (error) return null;
-      return data?.value || null;
+      const { data, error } = await this._client
+        .from(c.appStateTable)
+        .select('value,updated_at')
+        .eq('user_id', user.id)
+        .eq('key', STATE_KEY)
+        .maybeSingle();
+      if (error) return { ok: false, error: error.message, value: null };
+      return { ok: true, value: data?.value ?? null, updated_at: data?.updated_at };
+    },
+
+    async deleteState() {
+      const { data: { user } } = await this._client.auth.getUser();
+      if (!user) return;
+      const c = this.cfg();
+      await this._client.from(c.appStateTable).delete().eq('user_id', user.id).eq('key', STATE_KEY);
     },
 
     async upload(file, path) {
-      if (!this._client) await this.init();
-      const uid = await this.ensureSignedIn(true);
-      if (!uid || !file) return null;
+      const { data: { user } } = await this._client.auth.getUser();
+      if (!user || !file) return null;
       const c = this.cfg();
-      const storagePath = uid + '/' + path;
+      const storagePath = `${user.id}/${path}`;
       const { error } = await this._client.storage.from(c.bucket).upload(storagePath, file, {
         upsert: true,
         contentType: file.type || 'application/octet-stream'
       });
       if (error) {
-        console.warn('Storage upload failed', error.message || error);
-        global._mjLastUploadError = error.message || String(error);
+        global._mjLastUploadError = error.message;
         return null;
       }
       const { data } = this._client.storage.from(c.bucket).getPublicUrl(storagePath);
-      return data?.publicUrl || (c.url + '/storage/v1/object/public/' + c.bucket + '/' + storagePath);
+      return data.publicUrl;
+    },
+
+    async _subscribeRealtime() {
+      if (!this._client || this._channel) return;
+      const { data: { user } } = await this._client.auth.getUser();
+      if (!user) return;
+      const c = this.cfg();
+      this._channel = this._client
+        .channel(`mj_state_${user.id}`)
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: c.appStateTable,
+          filter: `user_id=eq.${user.id}`
+        }, () => {
+          if (typeof global.syncFromCloud === 'function') global.syncFromCloud(false);
+        })
+        .subscribe();
+    },
+
+    _unsubscribeRealtime() {
+      if (this._channel) {
+        this._client?.removeChannel(this._channel);
+        this._channel = null;
+      }
     },
 
     storageAdapter() {
@@ -178,38 +202,16 @@
       return {
         from(bucket) {
           return {
-            async upload(path, file) {
-              const c = self.cfg();
-              if (bucket !== c.bucket) return { data: null, error: { message: 'bad bucket' } };
-              const publicUrl = await self.upload(file, path);
-              return publicUrl ? { data: { path }, error: null } : { data: null, error: { message: 'upload failed' } };
-            },
-            getPublicUrl(path) {
-              const c = self.cfg();
-              const uid = null; // public url builder uses stored path
-              const p = path;
-              return { data: { publicUrl: c.url + '/storage/v1/object/public/' + c.bucket + '/' + p } };
-            }
+            upload: (path, file) => self.upload(file, path).then((url) =>
+              url ? { data: { path }, error: null } : { data: null, error: { message: global._mjLastUploadError || 'upload failed' } }
+            )
           };
         }
       };
     },
 
     clientAdapter() {
-      const self = this;
-      return {
-        storage: self.storageAdapter(),
-        from(table) {
-          return {
-            upsert: async (data) => {
-              // legacy compatibility: expect data.value -> upsert state
-              const val = data?.value ?? data;
-              const r = await self.upsertState(val);
-              return { data: r.ok ? data : null, error: r.ok ? null : r.error };
-            }
-          };
-        }
-      };
+      return { storage: this.storageAdapter(), from: () => ({ upsert: () => Promise.resolve({ error: null }) }) };
     }
   };
 
@@ -219,14 +221,14 @@
     const email = document.getElementById('cloud-auth-email')?.value?.trim();
     const pwd = document.getElementById('cloud-auth-password')?.value;
     const err = document.getElementById('cloud-auth-error');
-    if (!email || !pwd) { if (err) err.textContent = 'Email and password required'; return; }
+    if (!email || !pwd) { if (err) err.textContent = 'أدخل البريد وكلمة المرور'; return; }
     try {
       await MJCloud.signIn(email, pwd);
       if (err) err.textContent = '';
       MJCloud.resolveAuth(true);
-      if (typeof global.syncFromCloud === 'function') await global.syncFromCloud(true);
+      if (global.syncFromCloud) await global.syncFromCloud(true);
     } catch (e) {
-      if (err) err.textContent = e.message || 'Sign in failed';
+      if (err) err.textContent = e.message || 'فشل تسجيل الدخول';
     }
   };
 
@@ -234,15 +236,14 @@
     const email = document.getElementById('cloud-auth-email')?.value?.trim();
     const pwd = document.getElementById('cloud-auth-password')?.value;
     const err = document.getElementById('cloud-auth-error');
-    if (!email || !pwd) { if (err) err.textContent = 'Email and password required'; return; }
+    if (!email || !pwd) { if (err) err.textContent = 'أدخل البريد وكلمة المرور'; return; }
     try {
       await MJCloud.signUp(email, pwd);
       if (err) err.textContent = '';
       MJCloud.resolveAuth(true);
-      if (typeof global.syncFromCloud === 'function') await global.syncFromCloud(true);
+      if (global.syncFromCloud) await global.syncFromCloud(true);
     } catch (e) {
-      if (err) err.textContent = e.message || 'Sign up failed';
+      if (err) err.textContent = e.message || 'فشل إنشاء الحساب';
     }
   };
-
 })(typeof window !== 'undefined' ? window : globalThis);

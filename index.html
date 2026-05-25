@@ -11449,12 +11449,13 @@ if (typeof Object.freeze === 'function') {
     let SUPABASE_ENABLED = !!(typeof MJ_CONFIG !== 'undefined' && MJ_CONFIG.supabase?.enabled);
 
     async function supabaseUpsertAppState(_key, value) {
-      const r = await MJCloud.upsertState(value);
+      const r = await MJCloud.saveState(value);
       return r.ok;
     }
 
     async function supabaseGetAppState(_key) {
-      return MJCloud.loadState();
+      const r = await MJCloud.loadState();
+      return r.ok ? r.value : null;
     }
 
     async function uploadToSupabaseStorage(file, path) {
@@ -11968,7 +11969,9 @@ if (typeof Object.freeze === 'function') {
       if (id === 'modal-identity') populateIdentityModal();
     }
     function closeModal(id) { document.getElementById(id)?.classList.remove('show'); }
-    document.querySelectorAll('.modal-overlay').forEach(o => o.addEventListener('click', function (e) { if (e.target === this) this.classList.remove('show'); }));
+    document.querySelectorAll('.modal-overlay').forEach(o => o.addEventListener('click', function (e) {
+      if (e.target === this && !this.dataset.noDismiss) this.classList.remove('show');
+    }));
     function makeEditable(el) {
       el.contentEditable = true; el.focus();
       const r = document.createRange(); r.selectNodeContents(el);
@@ -12856,7 +12859,7 @@ if (typeof Object.freeze === 'function') {
     }
 
     // ═══════════════════════════════════════════════════
-    // SAVE — localStorage (text only, no images)
+    // SAVE — Supabase only (localStorage NOT used for app data)
     // ═══════════════════════════════════════════════════
     async function saveToLS(showMsg) {
       const state = {
@@ -12890,61 +12893,25 @@ if (typeof Object.freeze === 'function') {
         currentScreen
       };
       try {
-        // Save to Supabase FIRST (cloud is primary)
-        if (SUPABASE_ENABLED && supabaseClient) {
-          try {
-            const signedIn = typeof MJCloud !== 'undefined' && (await MJCloud.isSignedIn());
-            if (!signedIn) {
-              localStorage.setItem(LS_DATA, JSON.stringify(state));
-              if (showMsg) toast('⚠ Sign in to sync globally', 'warning');
+        if (typeof MJCloud !== 'undefined' && MJCloud.enabled()) {
+          if (!(await MJCloud.isSignedIn())) {
+            await MJCloud.requireAuth();
+            if (!(await MJCloud.isSignedIn())) {
+              if (showMsg) toast('يجب تسجيل الدخول لحفظ البيانات', 'warning');
               return;
             }
-            const saved = await supabaseUpsertAppState('mj_system_state', state);
-            localStorage.setItem(LS_DATA, JSON.stringify(state));
-            console.log('saveToLS: cloud save result', { saved, authReady: MJCloud.ready, userId: await MJCloud.userId() });
-            if (showMsg) {
-              toast(saved ? '✓ Saved to Cloud' : '⚠ Saved locally only', saved ? 'success' : 'warning');
-            }
-          } catch (cloudErr) {
-            console.error('Cloud save failed, using local:', cloudErr);
-            localStorage.setItem(LS_DATA, JSON.stringify(state));
-            if (showMsg) toast('⚠ Saved locally (no cloud)', 'warning');
           }
-        } else {
-          // No Supabase: save locally only
-          localStorage.setItem(LS_DATA, JSON.stringify(state));
-          if (showMsg) toast('System saved.', 'success');
+          const r = await MJCloud.saveState(state);
+          if (showMsg) toast(r.ok ? '✓ حُفظ في السحابة' : ('فشل الحفظ: ' + (r.error || '')), r.ok ? 'success' : 'error');
+          return;
         }
-      } catch (e) { console.warn('localStorage save error:', e); }
+        localStorage.setItem(LS_DATA, JSON.stringify(state));
+        if (showMsg) toast('System saved (offline mode).', 'success');
+      } catch (e) { console.warn('save error:', e); if (showMsg) toast('Save failed', 'error'); }
     }
 
-    // ═══════════════════════════════════════════════════
-    // LOAD — Supabase FIRST, then localStorage
-    // ═══════════════════════════════════════════════════
-    async function loadFromLS() {
-      try {
-        let raw = null;
-        let source = null;
-        
-        const signedIn = typeof MJCloud !== 'undefined' && MJCloud.enabled() && (await MJCloud.isSignedIn());
-        if (signedIn) {
-          try {
-            const remoteState = await supabaseGetAppState(null);
-            if (remoteState) {
-              raw = JSON.stringify(remoteState);
-              source = 'cloud';
-            }
-          } catch (err) {
-            console.warn('Failed to load from Supabase:', err);
-          }
-        }
-        if (!raw) {
-          raw = localStorage.getItem(LS_DATA);
-          source = 'local';
-        }
-        
-        if (!raw) return;
-        const d = JSON.parse(raw);
+    async function applyAppState(d, fromCloud) {
+      if (!d) return;
 
         // Text settings
         if (d.theme) document.documentElement.setAttribute('data-theme', d.theme);
