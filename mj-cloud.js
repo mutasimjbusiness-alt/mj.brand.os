@@ -109,6 +109,9 @@
       return new Promise((resolve) => {
         const el = document.getElementById('modal-cloud-auth');
         if (!el) { resolve(false); return; }
+        const savedEmail = global.localStorage?.getItem('mj_cloud_email');
+        const emailInp = document.getElementById('cloud-auth-email');
+        if (savedEmail && emailInp && !emailInp.value) emailInp.value = savedEmail;
         el.classList.add('show');
         el._authResolve = resolve;
         // listen once for auth state change
